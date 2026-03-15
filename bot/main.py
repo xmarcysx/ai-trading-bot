@@ -46,9 +46,15 @@ else:
     telegram_bot = None
 
 async def send_telegram_message(message: str):
-    if telegram_bot and TELEGRAM_CHAT_ID:
+    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
         try:
-            await telegram_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
+            from telegram import Bot
+            # Utworzenie świeżej instancji bota per strzał zapewnia, 
+            # że asyncio i httpx poprawnie wylevelują pule połączeń 
+            # przy ponownym użyciu asyncio.run() w pętli synchronicznej.
+            bot = Bot(token=TELEGRAM_BOT_TOKEN)
+            async with bot:
+                await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
         except Exception as e:
             print(f"Failed to send telegram message: {e}")
 
@@ -194,12 +200,11 @@ def get_chart(symbol: str = "ETH/USDT", timeframe: str = "1h"):
 
 @app.post("/api/config")
 def update_config(data: dict):
-    global TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, telegram_bot
+    global TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
     TELEGRAM_BOT_TOKEN = data.get("telegram_token", TELEGRAM_BOT_TOKEN)
     TELEGRAM_CHAT_ID = data.get("telegram_chat_id", TELEGRAM_CHAT_ID)
     
     if TELEGRAM_BOT_TOKEN:
-        telegram_bot = Bot(token=TELEGRAM_BOT_TOKEN)
         asyncio.run(send_telegram_message("✅ Konfiguracja Telegram zapisana. Otrzymujesz powiadomienia!"))
         
     return {"status": "success"}
