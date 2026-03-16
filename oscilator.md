@@ -69,7 +69,7 @@ macdNormLen    = input.int(200, "  Normalization lookback", minval=20, group
 macdNormSmooth = input.int(3, "  Normalization smoothing", minval=1, group=extra_Group)
 
 showMACD        = input.bool(true,  "Show MACD", group=extra_Group)
-showMACDHist    = input.bool(true,  "  Show Histogram", group=extra_Group)
+showMACDHist    = input.bool(false, "  Show Histogram", group=extra_Group)
 sourceInput     = input.source(close, "  Source", group=extra_Group)
 fastLenInput    = input.int(12, "  Fast length",   group=extra_Group, minval=1)
 slowLenInput    = input.int(26, "  Slow length",   group=extra_Group, minval=1)
@@ -309,31 +309,35 @@ zeroGray        = color.new(color.gray, 60)
 ma(float source, int length, string maType) =>
     maType == "EMA" ? ta.ema(source, length) : ta.sma(source, length)
 
+normalizeTo100(float src, int len) =>
+    float lo_ = ta.lowest(src, len)
+    float hi_ = ta.highest(src, len)
+    hi_ != lo_ ? (src - lo_) / (hi_ - lo_) * 100.0 : 50.0
+
 // Calculate MACD like the original indicator
 float maFast = ma(sourceInput, fastLenInput, oscTypeInput)
 float maSlow = ma(sourceInput, slowLenInput, oscTypeInput)
 float macd   = maFast - maSlow
 float signal = ma(macd, sigLenInput, sigTypeInput)
 float hist   = macd - signal
-float srcForNorm = hist  // możesz zmienić na macd, jeśli wolisz skalować linię
-float lo = ta.lowest(srcForNorm, macdNormLen)
-float hi = ta.highest(srcForNorm, macdNormLen)
-float norm = hi != lo ? (srcForNorm - lo) / (hi - lo) * 100.0 : 50.0
+float srcForNorm = hist
+float norm = normalizeTo100(srcForNorm, macdNormLen)
 float normSmoothed = ta.sma(norm, macdNormSmooth)
 
 // Histogram color logic (same idea as original)
 color hColor = hist >= 0 ? (hist > hist[1] ? #26a69a : #b2dfdb) : (hist > hist[1] ? #ffcdd2 : #ff5252)
 
-float macdPlotVal   = macdScaleTo100 ? (ta.sma((macd - ta.lowest(macd, macdNormLen)) / (ta.highest(macd, macdNormLen) - ta.lowest(macd, macdNormLen)) * 100.0, macdNormSmooth)) : macd
-float signalPlotVal = macdScaleTo100 ? (ta.sma((signal - ta.lowest(signal, macdNormLen)) / (ta.highest(signal, macdNormLen) - ta.lowest(signal, macdNormLen)) * 100.0, macdNormSmooth)) : signal
+float macdPlotVal   = macdScaleTo100 ? ta.sma(normalizeTo100(macd, macdNormLen), macdNormSmooth) : macd
+float signalPlotVal = macdScaleTo100 ? ta.sma(normalizeTo100(signal, macdNormLen), macdNormSmooth) : signal
+float histPlotVal   = macdScaleTo100 ? normSmoothed : hist
 
-plot(showMACD ? macdPlotVal : na, "MACD", linewidth=2)
-plot(showMACD ? signalPlotVal : na, "Signal line", #ff6d00, linewidth=2)
-plot(showMACD and showMACDHist ? (macdScaleTo100 ? normSmoothed : hist) : na, "Histogram", hColor, style=plot.style_columns)
+plot(showMACD ? macdPlotVal : na, "MACD", macdLineColor, linewidth=2)
+plot(showMACD ? signalPlotVal : na, "Signal line", macdSignalColor, linewidth=2)
+plot(showMACD and showMACDHist ? histPlotVal : na, "Histogram", hColor, style=plot.style_columns)
 
 
 // Zero line only if MACD is enabled
-hline(showMACD ? 0 : na, "Zero", #787b8680)
+hline(showMACD ? (macdScaleTo100 ? 50 : 0) : na, "Zero", color.new(#787b86, 40))
 
 // Alert conditions (optional, but nice)
 alertcondition(showMACD and hist[1] >= 0 and hist < 0, "Rising to falling", "MACD histogram switched from a rising to falling state")

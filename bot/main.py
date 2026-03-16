@@ -193,6 +193,9 @@ def get_chart(symbol: str = "ETH/USDT", timeframe: str = "1h"):
                 "ema9": row['ema_9'] if pd.notna(row['ema_9']) else None,
                 "ema18": row['ema_18'] if pd.notna(row['ema_18']) else None,
                 "mso": row['mso'] if pd.notna(row['mso']) else None,
+                "macdLine": row['macd_line'] if pd.notna(row['macd_line']) else None,
+                "macdSignal": row['macd_signal'] if pd.notna(row['macd_signal']) else None,
+                "cycleHist": row['cycle_hist'] if pd.notna(row['cycle_hist']) else None,
             })
         return {"status": "success", "data": chart_data}
     except Exception as e:
