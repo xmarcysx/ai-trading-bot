@@ -1,0 +1,7 @@
+{
+  "telegram_token": "8616104822:AAFYhG3lUVeWb6F41n4GRH87HeW2JsbWJrY",
+  "telegram_chat_id": "6762160501",
+  "active_strategy": "market_structure_lt_15",
+  "timeframe": "5m",
+  "repeat_alerts": false
+}

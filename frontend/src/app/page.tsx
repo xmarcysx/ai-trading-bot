@@ -16,7 +16,20 @@ interface BotData {
   status: string;
   last_check: string;
   signals: Signal[];
+  active_settings?: {
+    strategy: string;
+    timeframe: string;
+    repeat_alerts: boolean;
+  };
   metrics: Record<string, { mso: number; macd: number; trend: string; price: number } | undefined>;
+}
+
+interface AlertConfigData {
+  telegram_token: string;
+  telegram_chat_id: string;
+  active_strategy: string;
+  timeframe: string;
+  repeat_alerts: boolean;
 }
 
 interface ChartRow {
@@ -33,11 +46,39 @@ interface ChartRow {
   cycleHist: number | null;
 }
 
+const API_BASE_URL = 'http://localhost:8000';
+
+const STRATEGY_OPTIONS = [
+  { id: 'ema_cross_9_18', label: 'EMA Cross 9/18' },
+  { id: 'macd_cross', label: 'MACD Cross' },
+  { id: 'market_structure_gt_85', label: 'Market Structure Oscillator > 85' },
+  { id: 'market_structure_lt_15', label: 'Market Structure Oscillator < 15' },
+];
+
+const ALERT_TIMEFRAME_OPTIONS = ['5m', '15m', '1h', '4h'];
+
+const getStrategyLabel = (strategyId?: string) => {
+  if (!strategyId) {
+    return '--';
+  }
+  const matched = STRATEGY_OPTIONS.find((strategy) => strategy.id === strategyId);
+  return matched ? matched.label : strategyId;
+};
+
 export default function Dashboard() {
   const [mounted, setMounted] = useState(false);
   const [botData, setBotData] = useState<BotData | null>(null);
   const [activePair, setActivePair] = useState('ETH/USDT');
-  const [timeframe, setTimeframe] = useState('1h');
+  const [chartTimeframe, setChartTimeframe] = useState('1h');
+  const [alertConfig, setAlertConfig] = useState<AlertConfigData>({
+    telegram_token: '',
+    telegram_chat_id: '',
+    active_strategy: 'ema_cross_9_18',
+    timeframe: '1h',
+    repeat_alerts: false,
+  });
+  const [isSavingConfig, setIsSavingConfig] = useState(false);
+  const [configNotice, setConfigNotice] = useState<string | null>(null);
   
   const priceChartContainerRef = useRef<HTMLDivElement>(null);
   const oscillatorChartContainerRef = useRef<HTMLDivElement>(null);
@@ -63,7 +104,7 @@ export default function Dashboard() {
   // Fetch bot general state
   const fetchState = useCallback(async () => {
     try {
-      const res = await fetch('http://localhost:8000/api/state');
+      const res = await fetch(`${API_BASE_URL}/api/state`);
       if (res.ok) {
         const data = await res.json();
         setBotData(data);
@@ -73,10 +114,71 @@ export default function Dashboard() {
     }
   }, []);
 
+  const fetchConfig = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/config`);
+      if (!res.ok) {
+        return;
+      }
+
+      const payload = await res.json();
+      if (payload.status === 'success' && payload.data) {
+        setAlertConfig({
+          telegram_token: payload.data.telegram_token ?? '',
+          telegram_chat_id: payload.data.telegram_chat_id ?? '',
+          active_strategy: payload.data.active_strategy ?? 'ema_cross_9_18',
+          timeframe: payload.data.timeframe ?? '1h',
+          repeat_alerts: Boolean(payload.data.repeat_alerts),
+        });
+      }
+    } catch (err) {
+      console.error('Failed to fetch alert config', err);
+    }
+  }, []);
+
+  const saveAlertConfig = useCallback(async () => {
+    setIsSavingConfig(true);
+    setConfigNotice(null);
+
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/config`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(alertConfig),
+      });
+
+      if (!res.ok) {
+        const payload = await res.json().catch(() => null);
+        throw new Error(payload?.detail || 'Nie udało się zapisać konfiguracji alertów.');
+      }
+
+      const payload = await res.json();
+      if (payload.status === 'success' && payload.data) {
+        setAlertConfig({
+          telegram_token: payload.data.telegram_token ?? '',
+          telegram_chat_id: payload.data.telegram_chat_id ?? '',
+          active_strategy: payload.data.active_strategy ?? alertConfig.active_strategy,
+          timeframe: payload.data.timeframe ?? alertConfig.timeframe,
+          repeat_alerts: Boolean(payload.data.repeat_alerts),
+        });
+      }
+
+      setConfigNotice('Konfiguracja alertów została zapisana.');
+      fetchState();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Błąd zapisu konfiguracji alertów.';
+      setConfigNotice(message);
+    } finally {
+      setIsSavingConfig(false);
+    }
+  }, [alertConfig, fetchState]);
+
   // Fetch specific chart data
   const fetchChartData = useCallback(async () => {
     try {
-      const res = await fetch(`http://localhost:8000/api/chart?symbol=${activePair.replace('/', '%2F')}&timeframe=${timeframe}`);
+      const res = await fetch(`${API_BASE_URL}/api/chart?symbol=${activePair.replace('/', '%2F')}&timeframe=${chartTimeframe}`);
       if (res.ok) {
         const payload = await res.json();
         if (payload.status === "success" && Array.isArray(payload.data)) {
@@ -181,12 +283,17 @@ export default function Dashboard() {
     } catch (err) {
       console.error("Failed to fetch chart data", err);
     }
-  }, [activePair, timeframe]);
+  }, [activePair, chartTimeframe]);
 
   // Init
   useEffect(() => {
     setMounted(true);
   }, []);
+
+  useEffect(() => {
+    if (!mounted) return;
+    fetchConfig();
+  }, [mounted, fetchConfig]);
 
   useEffect(() => {
     if (!mounted) return;
@@ -285,18 +392,24 @@ export default function Dashboard() {
       borderVisible: false,
       wickUpColor: '#3fb950',
       wickDownColor: '#f85149',
+      priceLineVisible: false,
+      lastValueVisible: true,
     });
 
     const ema9Series = priceChart.addSeries(LineSeries, {
         color: '#3b82f6',
         lineWidth: 1,
         crosshairMarkerVisible: false,
+        priceLineVisible: false,
+        lastValueVisible: false,
     });
 
     const ema18Series = priceChart.addSeries(LineSeries, {
         color: '#f59e0b',
         lineWidth: 1,
         crosshairMarkerVisible: false,
+        priceLineVisible: false,
+        lastValueVisible: false,
     });
 
     const topZoneSeries = oscillatorChart.addSeries(BaselineSeries, {
@@ -332,8 +445,10 @@ export default function Dashboard() {
         type: 'price',
         precision: 2,
         minMove: 0.01,
-      },
+      }, 
       base: 50,
+      priceLineVisible: false,
+      lastValueVisible: false,
     });
 
     const msoAreaSeries = oscillatorChart.addSeries(BaselineSeries, {
@@ -353,19 +468,25 @@ export default function Dashboard() {
     const msoSeries = oscillatorChart.addSeries(LineSeries, {
       color: 'rgba(182, 239, 227, 0.88)',
       lineWidth: 1,
-        crosshairMarkerVisible: false,
+      crosshairMarkerVisible: false,
+      priceLineVisible: false,
+      lastValueVisible: false,
     });
 
     const macdLineSeries = oscillatorChart.addSeries(LineSeries, {
       color: '#1e63ff',
       lineWidth: 2,
-        crosshairMarkerVisible: false,
+      crosshairMarkerVisible: false,
+      priceLineVisible: false,
+      lastValueVisible: false,
     });
 
     const macdSignalSeries = oscillatorChart.addSeries(LineSeries, {
       color: '#ff8a00',
-        lineWidth: 2,
-        crosshairMarkerVisible: false,
+      lineWidth: 2,
+      crosshairMarkerVisible: false,
+      priceLineVisible: false,
+      lastValueVisible: false,
     });
 
     const upperBandSeries = oscillatorChart.addSeries(LineSeries, {
@@ -457,7 +578,7 @@ export default function Dashboard() {
       }
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mounted, activePair, timeframe]); 
+  }, [mounted, activePair, chartTimeframe]); 
 
   if (!mounted) return null;
 
@@ -504,16 +625,16 @@ export default function Dashboard() {
                         {['1m', '5m', '15m', '1h', '4h', '1d'].map(tf => (
                             <button 
                                 key={tf}
-                                onClick={() => setTimeframe(tf)}
+                          onClick={() => setChartTimeframe(tf)}
                                 style={{
-                                    background: timeframe === tf ? 'rgba(63, 185, 80, 0.1)' : 'transparent',
+                            background: chartTimeframe === tf ? 'rgba(63, 185, 80, 0.1)' : 'transparent',
                                     border: 'none',
-                                    color: timeframe === tf ? 'var(--success)' : 'var(--text-secondary)',
+                            color: chartTimeframe === tf ? 'var(--success)' : 'var(--text-secondary)',
                                     padding: '0.3rem 0.6rem',
                                     borderRadius: '4px',
                                     cursor: 'pointer',
                                     fontSize: '0.85rem',
-                                    fontWeight: timeframe === tf ? 600 : 400,
+                            fontWeight: chartTimeframe === tf ? 600 : 400,
                                     transition: 'all 0.2s'
                                 }}
                             >
@@ -594,6 +715,101 @@ export default function Dashboard() {
 
         {/* Signals Sidebar */}
         <div className="col-span-4 fade-in" style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem', animationDelay: '0.2s' }}>
+
+          {/* Alert Settings Panel */}
+          <div className="glass-panel">
+            <h2 className="panel-title">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 1v22"></path>
+                <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7H14a3.5 3.5 0 0 1 0 7H6"></path>
+              </svg>
+              Ustawienia Alertów
+            </h2>
+
+            <div className="form-group">
+              <label>Aktywna strategia</label>
+              <select
+                className="form-input"
+                value={alertConfig.active_strategy}
+                onChange={(event) => setAlertConfig((prev) => ({ ...prev, active_strategy: event.target.value }))}
+              >
+                {STRATEGY_OPTIONS.map((strategy) => (
+                  <option key={strategy.id} value={strategy.id}>
+                    {strategy.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="form-group">
+              <label>Timeframe alertów</label>
+              <select
+                className="form-input"
+                value={alertConfig.timeframe}
+                onChange={(event) => setAlertConfig((prev) => ({ ...prev, timeframe: event.target.value }))}
+              >
+                {ALERT_TIMEFRAME_OPTIONS.map((tf) => (
+                  <option key={tf} value={tf}>
+                    {tf}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="form-group">
+              <label>Telegram Bot Token</label>
+              <input
+                className="form-input"
+                type="password"
+                placeholder="Wklej token bota"
+                value={alertConfig.telegram_token}
+                onChange={(event) => setAlertConfig((prev) => ({ ...prev, telegram_token: event.target.value }))}
+              />
+            </div>
+
+            <div className="form-group">
+              <label>Telegram Chat ID</label>
+              <input
+                className="form-input"
+                type="text"
+                placeholder="Np. 123456789"
+                value={alertConfig.telegram_chat_id}
+                onChange={(event) => setAlertConfig((prev) => ({ ...prev, telegram_chat_id: event.target.value }))}
+              />
+            </div>
+
+            <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+              <input
+                type="checkbox"
+                checked={alertConfig.repeat_alerts}
+                onChange={(event) => setAlertConfig((prev) => ({ ...prev, repeat_alerts: event.target.checked }))}
+              />
+              Ponawiaj alerty, gdy warunek trwa przez kolejne świece
+            </label>
+
+            <button
+              className="btn-primary"
+              onClick={saveAlertConfig}
+              disabled={isSavingConfig}
+              style={{ opacity: isSavingConfig ? 0.7 : 1, cursor: isSavingConfig ? 'wait' : 'pointer' }}
+            >
+              {isSavingConfig ? 'Zapisywanie...' : 'Zapisz ustawienia'}
+            </button>
+
+            {configNotice && (
+              <div style={{ marginTop: '0.75rem', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                {configNotice}
+              </div>
+            )}
+
+            {botData?.active_settings && (
+              <div style={{ marginTop: '0.75rem', fontSize: '0.85rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+                <div>Aktywne po stronie bota: {getStrategyLabel(botData.active_settings.strategy)}</div>
+                <div>Timeframe: {botData.active_settings.timeframe}</div>
+                <div>Ponawianie: {botData.active_settings.repeat_alerts ? 'ON' : 'OFF'}</div>
+              </div>
+            )}
+          </div>
             
             {/* Signals Panel */}
             <div className="glass-panel" style={{ flexGrow: 1 }}>
