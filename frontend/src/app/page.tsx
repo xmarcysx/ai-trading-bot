@@ -17,7 +17,8 @@ interface BotData {
   last_check: string;
   signals: Signal[];
   active_settings?: {
-    strategy: string;
+    strategy?: string | null;
+    strategies?: string[];
     timeframe: string;
     repeat_alerts: boolean;
   };
@@ -27,7 +28,7 @@ interface BotData {
 interface AlertConfigData {
   telegram_token: string;
   telegram_chat_id: string;
-  active_strategy: string;
+  active_strategies: string[];
   timeframe: string;
   repeat_alerts: boolean;
 }
@@ -51,11 +52,10 @@ const API_BASE_URL = 'http://localhost:8000';
 const STRATEGY_OPTIONS = [
   { id: 'ema_cross_9_18', label: 'EMA Cross 9/18' },
   { id: 'macd_cross', label: 'MACD Cross' },
-  { id: 'market_structure_gt_85', label: 'Market Structure Oscillator > 85' },
-  { id: 'market_structure_lt_15', label: 'Market Structure Oscillator < 15' },
+  { id: 'market_structure_85_15', label: 'Market Structure Oscillator 85/15' },
 ];
 
-const ALERT_TIMEFRAME_OPTIONS = ['5m', '15m', '1h', '4h'];
+const ALERT_TIMEFRAME_OPTIONS = ['1m', '5m', '15m', '1h', '4h'];
 
 const getStrategyLabel = (strategyId?: string) => {
   if (!strategyId) {
@@ -73,7 +73,7 @@ export default function Dashboard() {
   const [alertConfig, setAlertConfig] = useState<AlertConfigData>({
     telegram_token: '',
     telegram_chat_id: '',
-    active_strategy: 'ema_cross_9_18',
+    active_strategies: ['ema_cross_9_18'],
     timeframe: '1h',
     repeat_alerts: false,
   });
@@ -123,10 +123,14 @@ export default function Dashboard() {
 
       const payload = await res.json();
       if (payload.status === 'success' && payload.data) {
+        const activeStrategies = Array.isArray(payload.data.active_strategies)
+          ? payload.data.active_strategies.filter((value: unknown): value is string => typeof value === 'string')
+          : (typeof payload.data.active_strategy === 'string' ? [payload.data.active_strategy] : []);
+
         setAlertConfig({
           telegram_token: payload.data.telegram_token ?? '',
           telegram_chat_id: payload.data.telegram_chat_id ?? '',
-          active_strategy: payload.data.active_strategy ?? 'ema_cross_9_18',
+          active_strategies: activeStrategies.length > 0 ? activeStrategies : ['ema_cross_9_18'],
           timeframe: payload.data.timeframe ?? '1h',
           repeat_alerts: Boolean(payload.data.repeat_alerts),
         });
@@ -137,6 +141,11 @@ export default function Dashboard() {
   }, []);
 
   const saveAlertConfig = useCallback(async () => {
+    if (alertConfig.active_strategies.length === 0) {
+      setConfigNotice('Wybierz co najmniej jedną strategię.');
+      return;
+    }
+
     setIsSavingConfig(true);
     setConfigNotice(null);
 
@@ -156,10 +165,14 @@ export default function Dashboard() {
 
       const payload = await res.json();
       if (payload.status === 'success' && payload.data) {
+        const activeStrategies = Array.isArray(payload.data.active_strategies)
+          ? payload.data.active_strategies.filter((value: unknown): value is string => typeof value === 'string')
+          : (typeof payload.data.active_strategy === 'string' ? [payload.data.active_strategy] : []);
+
         setAlertConfig({
           telegram_token: payload.data.telegram_token ?? '',
           telegram_chat_id: payload.data.telegram_chat_id ?? '',
-          active_strategy: payload.data.active_strategy ?? alertConfig.active_strategy,
+          active_strategies: activeStrategies.length > 0 ? activeStrategies : alertConfig.active_strategies,
           timeframe: payload.data.timeframe ?? alertConfig.timeframe,
           repeat_alerts: Boolean(payload.data.repeat_alerts),
         });
@@ -174,6 +187,26 @@ export default function Dashboard() {
       setIsSavingConfig(false);
     }
   }, [alertConfig, fetchState]);
+
+  const toggleStrategy = useCallback((strategyId: string, enabled: boolean) => {
+    setAlertConfig((prev) => {
+      if (enabled) {
+        if (prev.active_strategies.includes(strategyId)) {
+          return prev;
+        }
+        return { ...prev, active_strategies: [...prev.active_strategies, strategyId] };
+      }
+
+      if (!prev.active_strategies.includes(strategyId) || prev.active_strategies.length === 1) {
+        return prev;
+      }
+
+      return {
+        ...prev,
+        active_strategies: prev.active_strategies.filter((id) => id !== strategyId),
+      };
+    });
+  }, []);
 
   // Fetch specific chart data
   const fetchChartData = useCallback(async () => {
@@ -580,6 +613,10 @@ export default function Dashboard() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mounted, activePair, chartTimeframe]); 
 
+  const activeBotStrategies = botData?.active_settings?.strategies && botData.active_settings.strategies.length > 0
+    ? botData.active_settings.strategies
+    : (botData?.active_settings?.strategy ? [botData.active_settings.strategy] : []);
+
   if (!mounted) return null;
 
   return (
@@ -727,18 +764,25 @@ export default function Dashboard() {
             </h2>
 
             <div className="form-group">
-              <label>Aktywna strategia</label>
-              <select
-                className="form-input"
-                value={alertConfig.active_strategy}
-                onChange={(event) => setAlertConfig((prev) => ({ ...prev, active_strategy: event.target.value }))}
-              >
+              <label>Aktywne strategie</label>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
                 {STRATEGY_OPTIONS.map((strategy) => (
-                  <option key={strategy.id} value={strategy.id}>
+                  <label
+                    key={strategy.id}
+                    style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--text-secondary)', fontSize: '0.9rem' }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={alertConfig.active_strategies.includes(strategy.id)}
+                      onChange={(event) => toggleStrategy(strategy.id, event.target.checked)}
+                    />
                     {strategy.label}
-                  </option>
+                  </label>
                 ))}
-              </select>
+              </div>
+              <div style={{ marginTop: '0.5rem', color: 'var(--text-secondary)', fontSize: '0.8rem' }}>
+                Możesz mieć aktywnych kilka strategii jednocześnie.
+              </div>
             </div>
 
             <div className="form-group">
@@ -804,7 +848,7 @@ export default function Dashboard() {
 
             {botData?.active_settings && (
               <div style={{ marginTop: '0.75rem', fontSize: '0.85rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
-                <div>Aktywne po stronie bota: {getStrategyLabel(botData.active_settings.strategy)}</div>
+                <div>Aktywne po stronie bota: {activeBotStrategies.length > 0 ? activeBotStrategies.map((strategyId) => getStrategyLabel(strategyId)).join(', ') : '--'}</div>
                 <div>Timeframe: {botData.active_settings.timeframe}</div>
                 <div>Ponawianie: {botData.active_settings.repeat_alerts ? 'ON' : 'OFF'}</div>
               </div>

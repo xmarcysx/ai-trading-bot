@@ -3,7 +3,7 @@ import json
 import os
 import time
 from threading import Lock, Thread
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import ccxt
 import pandas as pd
@@ -22,26 +22,18 @@ load_dotenv()
 app = FastAPI()
 
 MONITORED_SYMBOLS = ["ETH/USDT:USDT", "BTC/USDT:USDT"]
-STRATEGY_DEFINITIONS: Dict[str, Dict[str, str]] = {
-    "ema_cross_9_18": {
-        "label": "EMA Cross 9/18",
-        "alert": "[cross emki] - {timeframe}",
-    },
-    "macd_cross": {
-        "label": "MACD Cross",
-        "alert": "[cross macd] - {timeframe}",
-    },
-    "market_structure_gt_85": {
-        "label": "Market Structure Oscillator > 85",
-        "alert": "[SHORT market structure] - {timeframe}",
-    },
-    "market_structure_lt_15": {
-        "label": "Market Structure Oscillator < 15",
-        "alert": "[LONG market structure] - {timeframe}",
-    },
+STRATEGY_DEFINITIONS: Dict[str, str] = {
+    "ema_cross_9_18": "EMA Cross 9/18",
+    "macd_cross": "MACD Cross",
+    "market_structure_85_15": "Market Structure Oscillator 85/15",
 }
-SUPPORTED_ALERT_TIMEFRAMES = ["5m", "15m", "1h", "4h"]
+LEGACY_STRATEGY_ALIASES = {
+    "market_structure_gt_85": "market_structure_85_15",
+    "market_structure_lt_15": "market_structure_85_15",
+}
+SUPPORTED_ALERT_TIMEFRAMES = ["1m", "5m", "15m", "1h", "4h"]
 TIMEFRAME_SECONDS = {
+    "1m": 60,
     "5m": 300,
     "15m": 900,
     "1h": 3600,
@@ -56,6 +48,7 @@ bot_state = {
     "signals": [],
     "active_settings": {
         "strategy": "ema_cross_9_18",
+        "strategies": ["ema_cross_9_18"],
         "timeframe": "1h",
         "repeat_alerts": False,
     },
@@ -71,7 +64,7 @@ ENV_TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 DEFAULT_RUNTIME_CONFIG: Dict[str, Any] = {
     "telegram_token": ENV_TELEGRAM_BOT_TOKEN,
     "telegram_chat_id": ENV_TELEGRAM_CHAT_ID,
-    "active_strategy": "ema_cross_9_18",
+    "active_strategies": ["ema_cross_9_18"],
     "timeframe": "1h",
     "repeat_alerts": False,
 }
@@ -80,9 +73,34 @@ DEFAULT_RUNTIME_CONFIG: Dict[str, Any] = {
 class ConfigUpdateRequest(BaseModel):
     telegram_token: Optional[str] = None
     telegram_chat_id: Optional[str] = None
+    active_strategies: Optional[List[str]] = None
+    # Backward-compatible single strategy input.
     active_strategy: Optional[str] = None
     timeframe: Optional[str] = None
     repeat_alerts: Optional[bool] = None
+
+
+def _normalize_strategy_id(strategy_id: str) -> Optional[str]:
+    if strategy_id in STRATEGY_DEFINITIONS:
+        return strategy_id
+    alias = LEGACY_STRATEGY_ALIASES.get(strategy_id)
+    if alias in STRATEGY_DEFINITIONS:
+        return alias
+    return None
+
+
+def _sanitize_strategy_list(raw: Any) -> List[str]:
+    if not isinstance(raw, list):
+        return []
+
+    sanitized: List[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        normalized = _normalize_strategy_id(item)
+        if normalized and normalized not in sanitized:
+            sanitized.append(normalized)
+    return sanitized
 
 
 def _sanitize_runtime_config(raw: Dict[str, Any]) -> Dict[str, Any]:
@@ -96,9 +114,16 @@ def _sanitize_runtime_config(raw: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(chat_id, str):
         sanitized["telegram_chat_id"] = chat_id.strip()
 
-    strategy = raw.get("active_strategy")
-    if strategy in STRATEGY_DEFINITIONS:
-        sanitized["active_strategy"] = strategy
+    strategies = _sanitize_strategy_list(raw.get("active_strategies"))
+    if not strategies:
+        legacy_strategy = raw.get("active_strategy")
+        if isinstance(legacy_strategy, str):
+            normalized_legacy = _normalize_strategy_id(legacy_strategy)
+            if normalized_legacy:
+                strategies = [normalized_legacy]
+
+    if strategies:
+        sanitized["active_strategies"] = strategies
 
     timeframe = raw.get("timeframe")
     if timeframe in SUPPORTED_ALERT_TIMEFRAMES:
@@ -141,27 +166,33 @@ runtime_config = _load_runtime_config()
 
 def get_runtime_config_snapshot() -> Dict[str, Any]:
     with config_lock:
-        return runtime_config.copy()
+        snapshot = runtime_config.copy()
+        snapshot["active_strategies"] = list(runtime_config["active_strategies"])
+        return snapshot
 
 
 def refresh_active_settings_state(config: Dict[str, Any]) -> None:
+    active_strategies = list(config["active_strategies"])
     bot_state["active_settings"] = {
-        "strategy": config["active_strategy"],
+        "strategy": active_strategies[0] if active_strategies else None,
+        "strategies": active_strategies,
         "timeframe": config["timeframe"],
         "repeat_alerts": config["repeat_alerts"],
     }
 
 
 def public_runtime_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    active_strategies = list(config["active_strategies"])
     return {
         "telegram_token": config["telegram_token"],
         "telegram_chat_id": config["telegram_chat_id"],
-        "active_strategy": config["active_strategy"],
+        "active_strategy": active_strategies[0] if active_strategies else None,
+        "active_strategies": active_strategies,
         "timeframe": config["timeframe"],
         "repeat_alerts": config["repeat_alerts"],
         "available_strategies": [
-            {"id": strategy_id, "label": strategy["label"]}
-            for strategy_id, strategy in STRATEGY_DEFINITIONS.items()
+            {"id": strategy_id, "label": strategy_label}
+            for strategy_id, strategy_label in STRATEGY_DEFINITIONS.items()
         ],
         "available_timeframes": SUPPORTED_ALERT_TIMEFRAMES,
     }
@@ -208,16 +239,33 @@ def calculate_indicators(df: pd.DataFrame):
 
 def get_poll_interval_seconds(timeframe: str) -> int:
     timeframe_seconds = TIMEFRAME_SECONDS.get(timeframe, 300)
-    return max(20, min(180, timeframe_seconds // 6))
+    return max(10, min(180, timeframe_seconds // 6))
+
+
+def _symbol_short_name(symbol: str) -> str:
+    return symbol.split("/")[0]
+
+
+def format_alert_message(signal_type: str, symbol: str, strategy_id: str, timeframe: str) -> str:
+    icon = "🟢" if signal_type == "LONG" else "🔴"
+    symbol_name = _symbol_short_name(symbol)
+    strategy_label = STRATEGY_DEFINITIONS.get(strategy_id, strategy_id)
+    return f"{icon} {signal_type} - {symbol_name} - aktywna strategia: {strategy_label} ({timeframe})"
+
+
+def build_status_text(active_strategies: List[str], timeframe: str) -> str:
+    strategy_labels = [STRATEGY_DEFINITIONS.get(strategy_id, strategy_id) for strategy_id in active_strategies]
+    if strategy_labels:
+        return f"Aktywne strategie: {', '.join(strategy_labels)} ({timeframe})"
+    return f"Brak aktywnych strategii ({timeframe})"
 
 
 def evaluate_active_strategy(
     strategy_id: str,
     prev: pd.Series,
     curr: pd.Series,
-    timeframe: str,
     repeat_alerts: bool,
-) -> Optional[Dict[str, str]]:
+) -> Optional[str]:
     ema_cross_up = prev['ema_9'] <= prev['ema_18'] and curr['ema_9'] > curr['ema_18']
     ema_cross_down = prev['ema_9'] >= prev['ema_18'] and curr['ema_9'] < curr['ema_18']
 
@@ -226,30 +274,27 @@ def evaluate_active_strategy(
 
     if strategy_id == 'ema_cross_9_18':
         if ema_cross_up:
-            return {"message": STRATEGY_DEFINITIONS[strategy_id]["alert"].format(timeframe=timeframe), "type": "LONG"}
+            return "LONG"
         if ema_cross_down:
-            return {"message": STRATEGY_DEFINITIONS[strategy_id]["alert"].format(timeframe=timeframe), "type": "SHORT"}
+            return "SHORT"
         return None
 
     if strategy_id == 'macd_cross':
         if macd_cross_up:
-            return {"message": STRATEGY_DEFINITIONS[strategy_id]["alert"].format(timeframe=timeframe), "type": "LONG"}
+            return "LONG"
         if macd_cross_down:
-            return {"message": STRATEGY_DEFINITIONS[strategy_id]["alert"].format(timeframe=timeframe), "type": "SHORT"}
+            return "SHORT"
         return None
 
-    if strategy_id == 'market_structure_gt_85':
+    if strategy_id == 'market_structure_85_15':
         is_above = curr['mso'] > 85
         crossed_above = prev['mso'] <= 85 and is_above
         if is_above and (repeat_alerts or crossed_above):
-            return {"message": STRATEGY_DEFINITIONS[strategy_id]["alert"].format(timeframe=timeframe), "type": "SHORT"}
-        return None
-
-    if strategy_id == 'market_structure_lt_15':
+            return "SHORT"
         is_below = curr['mso'] < 15
         crossed_below = prev['mso'] >= 15 and is_below
         if is_below and (repeat_alerts or crossed_below):
-            return {"message": STRATEGY_DEFINITIONS[strategy_id]["alert"].format(timeframe=timeframe), "type": "LONG"}
+            return "LONG"
         return None
 
     return None
@@ -269,7 +314,7 @@ def bot_loop():
     
     while True:
         config = get_runtime_config_snapshot()
-        active_strategy = config['active_strategy']
+        active_strategies = config['active_strategies']
         timeframe = config['timeframe']
         repeat_alerts = config['repeat_alerts']
         refresh_active_settings_state(config)
@@ -287,35 +332,40 @@ def bot_loop():
                 prev = df.iloc[-3]
                 closed_candle_timestamp = int(curr['timestamp'].timestamp())
 
-                signal = evaluate_active_strategy(
-                    active_strategy,
-                    prev,
-                    curr,
-                    timeframe,
-                    repeat_alerts,
-                )
+                for strategy_id in active_strategies:
+                    signal_type = evaluate_active_strategy(
+                        strategy_id,
+                        prev,
+                        curr,
+                        repeat_alerts,
+                    )
 
-                if signal:
-                    marker_key = f"{symbol}|{active_strategy}|{signal['type']}"
+                    if not signal_type:
+                        continue
+
+                    marker_key = f"{symbol}|{timeframe}|{strategy_id}|{signal_type}"
                     already_sent_for_candle = last_alert_marker.get(marker_key) == closed_candle_timestamp
 
-                    if not already_sent_for_candle:
-                        print(f"{symbol} {signal['message']}")
-                        asyncio.run(send_telegram_message(
-                            signal['message'],
-                            config['telegram_token'],
-                            config['telegram_chat_id'],
-                        ))
-                        last_alert_marker[marker_key] = closed_candle_timestamp
-                    
-                        bot_state["signals"].insert(0, {
-                            "pair": symbol.replace(':USDT', ''),
-                            "type": signal['type'],
-                            "time": time.strftime("%H:%M:%S"),
-                            "reason": signal['message'],
-                        })
+                    if already_sent_for_candle:
+                        continue
 
-                        bot_state["signals"] = bot_state["signals"][:20]
+                    message = format_alert_message(signal_type, symbol, strategy_id, timeframe)
+                    print(f"{symbol} {message}")
+                    asyncio.run(send_telegram_message(
+                        message,
+                        config['telegram_token'],
+                        config['telegram_chat_id'],
+                    ))
+                    last_alert_marker[marker_key] = closed_candle_timestamp
+
+                    bot_state["signals"].insert(0, {
+                        "pair": symbol.replace(':USDT', ''),
+                        "type": signal_type,
+                        "time": time.strftime("%H:%M:%S"),
+                        "reason": message,
+                    })
+
+                    bot_state["signals"] = bot_state["signals"][:20]
                 
                 # Update frontend metrics
                 mso_curr = float(curr['mso']) if pd.notna(curr['mso']) else 50.0
@@ -329,7 +379,7 @@ def bot_loop():
                     "price": round(curr['close'], 2)
                 }
             
-            bot_state["status"] = f"Aktywna strategia: {STRATEGY_DEFINITIONS[active_strategy]['label']} ({timeframe})"
+            bot_state["status"] = build_status_text(active_strategies, timeframe)
             bot_state["last_check"] = time.strftime("%H:%M:%S")
             time.sleep(get_poll_interval_seconds(timeframe))
         except Exception as e:
@@ -396,10 +446,16 @@ def update_config(data: ConfigUpdateRequest):
         if data.telegram_chat_id is not None:
             next_config["telegram_chat_id"] = data.telegram_chat_id.strip()
 
-        if data.active_strategy is not None:
-            if data.active_strategy not in STRATEGY_DEFINITIONS:
+        if data.active_strategies is not None:
+            sanitized_strategies = _sanitize_strategy_list(data.active_strategies)
+            if not sanitized_strategies:
+                raise HTTPException(status_code=400, detail="Wybierz co najmniej jedną obsługiwaną strategię")
+            next_config["active_strategies"] = sanitized_strategies
+        elif data.active_strategy is not None:
+            normalized_strategy = _normalize_strategy_id(data.active_strategy)
+            if not normalized_strategy:
                 raise HTTPException(status_code=400, detail="Nieobsługiwana strategia")
-            next_config["active_strategy"] = data.active_strategy
+            next_config["active_strategies"] = [normalized_strategy]
 
         if data.timeframe is not None:
             if data.timeframe not in SUPPORTED_ALERT_TIMEFRAMES:
@@ -409,11 +465,14 @@ def update_config(data: ConfigUpdateRequest):
         if data.repeat_alerts is not None:
             next_config["repeat_alerts"] = data.repeat_alerts
 
-        runtime_config.update(next_config)
+        sanitized_next = _sanitize_runtime_config(next_config)
+        runtime_config.clear()
+        runtime_config.update(sanitized_next)
         _save_runtime_config(runtime_config)
         snapshot = runtime_config.copy()
 
     refresh_active_settings_state(snapshot)
+    bot_state["status"] = build_status_text(snapshot["active_strategies"], snapshot["timeframe"])
 
     if snapshot['telegram_token'] and snapshot['telegram_chat_id']:
         asyncio.run(send_telegram_message(
