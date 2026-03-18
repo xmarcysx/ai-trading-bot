@@ -247,8 +247,6 @@ body {
 }
 
 .header-action-btn {
-  width: 190px;
-  min-width: 190px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
