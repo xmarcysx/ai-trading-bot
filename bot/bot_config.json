@@ -6,6 +6,11 @@
     "ema_cross_9_18",
     "macd_cross"
   ],
+  "active_symbols": [
+    "ETH/USDT",
+    "BTC/USDT"
+  ],
   "timeframe": "1m",
-  "repeat_alerts": false
+  "repeat_alerts": false,
+  "strategies_active": true
 }

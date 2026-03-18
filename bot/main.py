@@ -21,7 +21,8 @@ load_dotenv()
 
 app = FastAPI()
 
-MONITORED_SYMBOLS = ["ETH/USDT:USDT", "BTC/USDT:USDT"]
+MONITORED_SYMBOLS = ["ETH/USDT", "BTC/USDT"]
+SUPPORTED_ALERT_SYMBOLS = MONITORED_SYMBOLS.copy()
 STRATEGY_DEFINITIONS: Dict[str, str] = {
     "ema_cross_9_18": "EMA Cross 9/18",
     "macd_cross": "MACD Cross",
@@ -49,12 +50,14 @@ bot_state = {
     "active_settings": {
         "strategy": "ema_cross_9_18",
         "strategies": ["ema_cross_9_18"],
+        "symbols": ["ETH/USDT", "BTC/USDT"],
         "timeframe": "1h",
         "repeat_alerts": False,
+        "strategies_active": True,
     },
     "metrics": {
-        "ETH/USDT": {"mso": 50, "macd": 50, "trend": "Neutralny", "price": 0},
-        "BTC/USDT": {"mso": 50, "macd": 50, "trend": "Neutralny", "price": 0}
+        symbol: {"mso": 50, "macd": 50, "trend": "Neutralny", "price": 0}
+        for symbol in MONITORED_SYMBOLS
     }
 }
 
@@ -65,8 +68,10 @@ DEFAULT_RUNTIME_CONFIG: Dict[str, Any] = {
     "telegram_token": ENV_TELEGRAM_BOT_TOKEN,
     "telegram_chat_id": ENV_TELEGRAM_CHAT_ID,
     "active_strategies": ["ema_cross_9_18"],
+    "active_symbols": SUPPORTED_ALERT_SYMBOLS.copy(),
     "timeframe": "1h",
     "repeat_alerts": False,
+    "strategies_active": True,
 }
 
 
@@ -74,10 +79,16 @@ class ConfigUpdateRequest(BaseModel):
     telegram_token: Optional[str] = None
     telegram_chat_id: Optional[str] = None
     active_strategies: Optional[List[str]] = None
+    active_symbols: Optional[List[str]] = None
     # Backward-compatible single strategy input.
     active_strategy: Optional[str] = None
     timeframe: Optional[str] = None
     repeat_alerts: Optional[bool] = None
+    strategies_active: Optional[bool] = None
+
+
+class StrategyActivityUpdateRequest(BaseModel):
+    active: bool
 
 
 def _normalize_strategy_id(strategy_id: str) -> Optional[str]:
@@ -98,6 +109,32 @@ def _sanitize_strategy_list(raw: Any) -> List[str]:
         if not isinstance(item, str):
             continue
         normalized = _normalize_strategy_id(item)
+        if normalized and normalized not in sanitized:
+            sanitized.append(normalized)
+    return sanitized
+
+
+def _normalize_symbol(symbol: str) -> Optional[str]:
+    if symbol in SUPPORTED_ALERT_SYMBOLS:
+        return symbol
+
+    if symbol.endswith(":USDT"):
+        normalized = symbol.replace(":USDT", "")
+        if normalized in SUPPORTED_ALERT_SYMBOLS:
+            return normalized
+
+    return None
+
+
+def _sanitize_symbol_list(raw: Any) -> List[str]:
+    if not isinstance(raw, list):
+        return []
+
+    sanitized: List[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        normalized = _normalize_symbol(item)
         if normalized and normalized not in sanitized:
             sanitized.append(normalized)
     return sanitized
@@ -125,6 +162,10 @@ def _sanitize_runtime_config(raw: Dict[str, Any]) -> Dict[str, Any]:
     if strategies:
         sanitized["active_strategies"] = strategies
 
+    symbols = _sanitize_symbol_list(raw.get("active_symbols"))
+    if symbols:
+        sanitized["active_symbols"] = symbols
+
     timeframe = raw.get("timeframe")
     if timeframe in SUPPORTED_ALERT_TIMEFRAMES:
         sanitized["timeframe"] = timeframe
@@ -132,6 +173,10 @@ def _sanitize_runtime_config(raw: Dict[str, Any]) -> Dict[str, Any]:
     repeat_alerts = raw.get("repeat_alerts")
     if isinstance(repeat_alerts, bool):
         sanitized["repeat_alerts"] = repeat_alerts
+
+    strategies_active = raw.get("strategies_active")
+    if isinstance(strategies_active, bool):
+        sanitized["strategies_active"] = strategies_active
 
     return sanitized
 
@@ -168,32 +213,40 @@ def get_runtime_config_snapshot() -> Dict[str, Any]:
     with config_lock:
         snapshot = runtime_config.copy()
         snapshot["active_strategies"] = list(runtime_config["active_strategies"])
+        snapshot["active_symbols"] = list(runtime_config["active_symbols"])
         return snapshot
 
 
 def refresh_active_settings_state(config: Dict[str, Any]) -> None:
     active_strategies = list(config["active_strategies"])
+    active_symbols = list(config["active_symbols"])
     bot_state["active_settings"] = {
         "strategy": active_strategies[0] if active_strategies else None,
         "strategies": active_strategies,
+        "symbols": active_symbols,
         "timeframe": config["timeframe"],
         "repeat_alerts": config["repeat_alerts"],
+        "strategies_active": config["strategies_active"],
     }
 
 
 def public_runtime_config(config: Dict[str, Any]) -> Dict[str, Any]:
     active_strategies = list(config["active_strategies"])
+    active_symbols = list(config["active_symbols"])
     return {
         "telegram_token": config["telegram_token"],
         "telegram_chat_id": config["telegram_chat_id"],
         "active_strategy": active_strategies[0] if active_strategies else None,
         "active_strategies": active_strategies,
+        "active_symbols": active_symbols,
         "timeframe": config["timeframe"],
         "repeat_alerts": config["repeat_alerts"],
+        "strategies_active": config["strategies_active"],
         "available_strategies": [
             {"id": strategy_id, "label": strategy_label}
             for strategy_id, strategy_label in STRATEGY_DEFINITIONS.items()
         ],
+        "available_symbols": SUPPORTED_ALERT_SYMBOLS,
         "available_timeframes": SUPPORTED_ALERT_TIMEFRAMES,
     }
 
@@ -246,6 +299,10 @@ def _symbol_short_name(symbol: str) -> str:
     return symbol.split("/")[0]
 
 
+def _fetch_symbol(symbol: str) -> str:
+    return f"{symbol}:USDT"
+
+
 def format_alert_message(signal_type: str, symbol: str, strategy_id: str, timeframe: str) -> str:
     icon = "🟢" if signal_type == "LONG" else "🔴"
     symbol_name = _symbol_short_name(symbol)
@@ -253,11 +310,17 @@ def format_alert_message(signal_type: str, symbol: str, strategy_id: str, timefr
     return f"{icon} {signal_type} - {symbol_name} - aktywna strategia: {strategy_label} ({timeframe})"
 
 
-def build_status_text(active_strategies: List[str], timeframe: str) -> str:
+def build_status_text(active_strategies: List[str], timeframe: str, active_symbols: List[str], strategies_active: bool) -> str:
+    symbol_labels = ", ".join(_symbol_short_name(symbol) for symbol in active_symbols)
+    symbols_context = f" | Pary: {symbol_labels}" if symbol_labels else ""
+
+    if not strategies_active:
+        return f"Strategie wyłączone ({timeframe}){symbols_context}"
+
     strategy_labels = [STRATEGY_DEFINITIONS.get(strategy_id, strategy_id) for strategy_id in active_strategies]
     if strategy_labels:
-        return f"Aktywne strategie: {', '.join(strategy_labels)} ({timeframe})"
-    return f"Brak aktywnych strategii ({timeframe})"
+        return f"Aktywne strategie: {', '.join(strategy_labels)} ({timeframe}){symbols_context}"
+    return f"Brak aktywnych strategii ({timeframe}){symbols_context}"
 
 
 def evaluate_active_strategy(
@@ -315,13 +378,15 @@ def bot_loop():
     while True:
         config = get_runtime_config_snapshot()
         active_strategies = config['active_strategies']
+        active_symbols = config['active_symbols']
         timeframe = config['timeframe']
         repeat_alerts = config['repeat_alerts']
+        strategies_active = config['strategies_active']
         refresh_active_settings_state(config)
 
         try:
-            for symbol in MONITORED_SYMBOLS:
-                df = fetch_klines(symbol, timeframe, 250)
+            for symbol in active_symbols:
+                df = fetch_klines(_fetch_symbol(symbol), timeframe, 250)
                 df = calculate_indicators(df)
 
                 if len(df) < 4:
@@ -332,54 +397,55 @@ def bot_loop():
                 prev = df.iloc[-3]
                 closed_candle_timestamp = int(curr['timestamp'].timestamp())
 
-                for strategy_id in active_strategies:
-                    signal_type = evaluate_active_strategy(
-                        strategy_id,
-                        prev,
-                        curr,
-                        repeat_alerts,
-                    )
+                if strategies_active:
+                    for strategy_id in active_strategies:
+                        signal_type = evaluate_active_strategy(
+                            strategy_id,
+                            prev,
+                            curr,
+                            repeat_alerts,
+                        )
 
-                    if not signal_type:
-                        continue
+                        if not signal_type:
+                            continue
 
-                    marker_key = f"{symbol}|{timeframe}|{strategy_id}|{signal_type}"
-                    already_sent_for_candle = last_alert_marker.get(marker_key) == closed_candle_timestamp
+                        marker_key = f"{symbol}|{timeframe}|{strategy_id}|{signal_type}"
+                        already_sent_for_candle = last_alert_marker.get(marker_key) == closed_candle_timestamp
 
-                    if already_sent_for_candle:
-                        continue
+                        if already_sent_for_candle:
+                            continue
 
-                    message = format_alert_message(signal_type, symbol, strategy_id, timeframe)
-                    print(f"{symbol} {message}")
-                    asyncio.run(send_telegram_message(
-                        message,
-                        config['telegram_token'],
-                        config['telegram_chat_id'],
-                    ))
-                    last_alert_marker[marker_key] = closed_candle_timestamp
+                        message = format_alert_message(signal_type, symbol, strategy_id, timeframe)
+                        print(f"{symbol} {message}")
+                        asyncio.run(send_telegram_message(
+                            message,
+                            config['telegram_token'],
+                            config['telegram_chat_id'],
+                        ))
+                        last_alert_marker[marker_key] = closed_candle_timestamp
 
-                    bot_state["signals"].insert(0, {
-                        "pair": symbol.replace(':USDT', ''),
-                        "type": signal_type,
-                        "time": time.strftime("%H:%M:%S"),
-                        "reason": message,
-                    })
+                        bot_state["signals"].insert(0, {
+                            "pair": symbol,
+                            "type": signal_type,
+                            "time": time.strftime("%H:%M:%S"),
+                            "reason": message,
+                        })
 
-                    bot_state["signals"] = bot_state["signals"][:20]
+                        bot_state["signals"] = bot_state["signals"][:20]
                 
                 # Update frontend metrics
                 mso_curr = float(curr['mso']) if pd.notna(curr['mso']) else 50.0
                 macd_norm_curr = float(curr['macd_norm']) if pd.notna(curr['macd_norm']) else 50.0
                 trend = "Byczy" if pd.notna(curr['ema_9']) and pd.notna(curr['ema_18']) and curr['ema_9'] >= curr['ema_18'] else "Niedźwiedzi"
 
-                bot_state["metrics"][symbol.replace(':USDT', '')] = {
+                bot_state["metrics"][symbol] = {
                     "mso": round(mso_curr, 1),
                     "macd": round(macd_norm_curr, 1),
                     "trend": trend,
                     "price": round(curr['close'], 2)
                 }
             
-            bot_state["status"] = build_status_text(active_strategies, timeframe)
+            bot_state["status"] = build_status_text(active_strategies, timeframe, active_symbols, strategies_active)
             bot_state["last_check"] = time.strftime("%H:%M:%S")
             time.sleep(get_poll_interval_seconds(timeframe))
         except Exception as e:
@@ -457,6 +523,12 @@ def update_config(data: ConfigUpdateRequest):
                 raise HTTPException(status_code=400, detail="Nieobsługiwana strategia")
             next_config["active_strategies"] = [normalized_strategy]
 
+        if data.active_symbols is not None:
+            sanitized_symbols = _sanitize_symbol_list(data.active_symbols)
+            if not sanitized_symbols:
+                raise HTTPException(status_code=400, detail="Wybierz co najmniej jedną obsługiwaną parę")
+            next_config["active_symbols"] = sanitized_symbols
+
         if data.timeframe is not None:
             if data.timeframe not in SUPPORTED_ALERT_TIMEFRAMES:
                 raise HTTPException(status_code=400, detail="Nieobsługiwany timeframe")
@@ -465,6 +537,9 @@ def update_config(data: ConfigUpdateRequest):
         if data.repeat_alerts is not None:
             next_config["repeat_alerts"] = data.repeat_alerts
 
+        if data.strategies_active is not None:
+            next_config["strategies_active"] = data.strategies_active
+
         sanitized_next = _sanitize_runtime_config(next_config)
         runtime_config.clear()
         runtime_config.update(sanitized_next)
@@ -472,7 +547,12 @@ def update_config(data: ConfigUpdateRequest):
         snapshot = runtime_config.copy()
 
     refresh_active_settings_state(snapshot)
-    bot_state["status"] = build_status_text(snapshot["active_strategies"], snapshot["timeframe"])
+    bot_state["status"] = build_status_text(
+        snapshot["active_strategies"],
+        snapshot["timeframe"],
+        snapshot["active_symbols"],
+        snapshot["strategies_active"],
+    )
 
     if snapshot['telegram_token'] and snapshot['telegram_chat_id']:
         asyncio.run(send_telegram_message(
@@ -482,6 +562,29 @@ def update_config(data: ConfigUpdateRequest):
         ))
 
     return {"status": "success", "data": public_runtime_config(snapshot)}
+
+
+@app.post("/api/strategies/active")
+def update_strategies_activity(data: StrategyActivityUpdateRequest):
+    with config_lock:
+        next_config = runtime_config.copy()
+        next_config["strategies_active"] = data.active
+
+        sanitized_next = _sanitize_runtime_config(next_config)
+        runtime_config.clear()
+        runtime_config.update(sanitized_next)
+        _save_runtime_config(runtime_config)
+        snapshot = runtime_config.copy()
+
+    refresh_active_settings_state(snapshot)
+    bot_state["status"] = build_status_text(
+        snapshot["active_strategies"],
+        snapshot["timeframe"],
+        snapshot["active_symbols"],
+        snapshot["strategies_active"],
+    )
+
+    return {"status": "success", "data": {"strategies_active": snapshot["strategies_active"]}}
 
 if __name__ == "__main__":
     # Start bot loop in a background thread

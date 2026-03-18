@@ -19,8 +19,10 @@ interface BotData {
   active_settings?: {
     strategy?: string | null;
     strategies?: string[];
+    symbols?: string[];
     timeframe: string;
     repeat_alerts: boolean;
+    strategies_active?: boolean;
   };
   metrics: Record<string, { mso: number; macd: number; trend: string; price: number } | undefined>;
 }
@@ -29,6 +31,7 @@ interface AlertConfigData {
   telegram_token: string;
   telegram_chat_id: string;
   active_strategies: string[];
+  active_symbols: string[];
   timeframe: string;
   repeat_alerts: boolean;
 }
@@ -55,6 +58,7 @@ const STRATEGY_OPTIONS = [
   { id: 'market_structure_85_15', label: 'Market Structure Oscillator 85/15' },
 ];
 
+const ALERT_SYMBOL_OPTIONS = ['ETH/USDT', 'BTC/USDT'];
 const ALERT_TIMEFRAME_OPTIONS = ['1m', '5m', '15m', '1h', '4h'];
 
 const getStrategyLabel = (strategyId?: string) => {
@@ -74,11 +78,16 @@ export default function Dashboard() {
     telegram_token: '',
     telegram_chat_id: '',
     active_strategies: ['ema_cross_9_18'],
+    active_symbols: ALERT_SYMBOL_OPTIONS,
     timeframe: '1h',
     repeat_alerts: false,
   });
+  const [isConfigDialogOpen, setIsConfigDialogOpen] = useState(false);
+  const [isStrategiesActive, setIsStrategiesActive] = useState(true);
+  const [isTogglingStrategies, setIsTogglingStrategies] = useState(false);
   const [isSavingConfig, setIsSavingConfig] = useState(false);
   const [configNotice, setConfigNotice] = useState<string | null>(null);
+  const [activityNotice, setActivityNotice] = useState<string | null>(null);
   
   const priceChartContainerRef = useRef<HTMLDivElement>(null);
   const oscillatorChartContainerRef = useRef<HTMLDivElement>(null);
@@ -126,14 +135,24 @@ export default function Dashboard() {
         const activeStrategies = Array.isArray(payload.data.active_strategies)
           ? payload.data.active_strategies.filter((value: unknown): value is string => typeof value === 'string')
           : (typeof payload.data.active_strategy === 'string' ? [payload.data.active_strategy] : []);
+        const activeSymbols = Array.isArray(payload.data.active_symbols)
+          ? payload.data.active_symbols
+              .filter((value: unknown): value is string => typeof value === 'string')
+              .filter((value: string) => ALERT_SYMBOL_OPTIONS.includes(value))
+          : [];
 
         setAlertConfig({
           telegram_token: payload.data.telegram_token ?? '',
           telegram_chat_id: payload.data.telegram_chat_id ?? '',
           active_strategies: activeStrategies.length > 0 ? activeStrategies : ['ema_cross_9_18'],
+          active_symbols: activeSymbols.length > 0 ? activeSymbols : ALERT_SYMBOL_OPTIONS,
           timeframe: payload.data.timeframe ?? '1h',
           repeat_alerts: Boolean(payload.data.repeat_alerts),
         });
+
+        if (typeof payload.data.strategies_active === 'boolean') {
+          setIsStrategiesActive(payload.data.strategies_active);
+        }
       }
     } catch (err) {
       console.error('Failed to fetch alert config', err);
@@ -143,6 +162,11 @@ export default function Dashboard() {
   const saveAlertConfig = useCallback(async () => {
     if (alertConfig.active_strategies.length === 0) {
       setConfigNotice('Wybierz co najmniej jedną strategię.');
+      return;
+    }
+
+    if (alertConfig.active_symbols.length === 0) {
+      setConfigNotice('Wybierz co najmniej jedną parę.');
       return;
     }
 
@@ -168,17 +192,24 @@ export default function Dashboard() {
         const activeStrategies = Array.isArray(payload.data.active_strategies)
           ? payload.data.active_strategies.filter((value: unknown): value is string => typeof value === 'string')
           : (typeof payload.data.active_strategy === 'string' ? [payload.data.active_strategy] : []);
+        const activeSymbols = Array.isArray(payload.data.active_symbols)
+          ? payload.data.active_symbols
+              .filter((value: unknown): value is string => typeof value === 'string')
+              .filter((value: string) => ALERT_SYMBOL_OPTIONS.includes(value))
+          : [];
 
         setAlertConfig({
           telegram_token: payload.data.telegram_token ?? '',
           telegram_chat_id: payload.data.telegram_chat_id ?? '',
           active_strategies: activeStrategies.length > 0 ? activeStrategies : alertConfig.active_strategies,
+          active_symbols: activeSymbols.length > 0 ? activeSymbols : alertConfig.active_symbols,
           timeframe: payload.data.timeframe ?? alertConfig.timeframe,
           repeat_alerts: Boolean(payload.data.repeat_alerts),
         });
       }
 
       setConfigNotice('Konfiguracja alertów została zapisana.');
+      setIsConfigDialogOpen(false);
       fetchState();
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Błąd zapisu konfiguracji alertów.';
@@ -207,6 +238,56 @@ export default function Dashboard() {
       };
     });
   }, []);
+
+  const toggleAlertSymbol = useCallback((symbol: string, enabled: boolean) => {
+    setAlertConfig((prev) => {
+      if (enabled) {
+        if (prev.active_symbols.includes(symbol)) {
+          return prev;
+        }
+        return { ...prev, active_symbols: [...prev.active_symbols, symbol] };
+      }
+
+      if (!prev.active_symbols.includes(symbol) || prev.active_symbols.length === 1) {
+        return prev;
+      }
+
+      return {
+        ...prev,
+        active_symbols: prev.active_symbols.filter((value) => value !== symbol),
+      };
+    });
+  }, []);
+
+  const toggleStrategiesActivity = useCallback(async () => {
+    const nextState = !isStrategiesActive;
+    setIsTogglingStrategies(true);
+    setActivityNotice(null);
+
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/strategies/active`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ active: nextState }),
+      });
+
+      if (!res.ok) {
+        const payload = await res.json().catch(() => null);
+        throw new Error(payload?.detail || 'Nie udało się zmienić aktywności strategii.');
+      }
+
+      setIsStrategiesActive(nextState);
+      setActivityNotice(nextState ? 'Strategie aktywne.' : 'Strategie wyłączone.');
+      fetchState();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Błąd przełączania aktywności strategii.';
+      setActivityNotice(message);
+    } finally {
+      setIsTogglingStrategies(false);
+    }
+  }, [fetchState, isStrategiesActive]);
 
   // Fetch specific chart data
   const fetchChartData = useCallback(async () => {
@@ -339,6 +420,12 @@ export default function Dashboard() {
     }, 5000);
     return () => clearInterval(interval);
   }, [fetchState, fetchChartData, mounted]);
+
+  useEffect(() => {
+    if (typeof botData?.active_settings?.strategies_active === 'boolean') {
+      setIsStrategiesActive(botData.active_settings.strategies_active);
+    }
+  }, [botData?.active_settings?.strategies_active]);
 
   // Handle Chart Structure and Resize (re-runs when Pair or Timeframe changes to properly flush/re-init)
   useEffect(() => {
@@ -616,152 +703,224 @@ export default function Dashboard() {
   const activeBotStrategies = botData?.active_settings?.strategies && botData.active_settings.strategies.length > 0
     ? botData.active_settings.strategies
     : (botData?.active_settings?.strategy ? [botData.active_settings.strategy] : []);
+  const activeBotSymbols = botData?.active_settings?.symbols && botData.active_settings.symbols.length > 0
+    ? botData.active_settings.symbols
+    : ALERT_SYMBOL_OPTIONS;
 
   if (!mounted) return null;
 
   return (
-    <div className="dashboard-container">
-      <header className="header fade-in">
-        <h1>
-          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
-          </svg>
-          AI Trading Crypto Bot
-        </h1>
-        <div className="flex gap-4 items-center">
-            {botData ? (
-                <div className="status-badge">
-                <div className="status-dot"></div>
-                {botData.status}
-                </div>
-            ) : (
-                <div className="status-badge" style={{ background: 'rgba(248, 81, 73, 0.1)', color: 'var(--danger)', borderColor: 'rgba(248, 81, 73, 0.2)'}}>
-                <div className="status-dot" style={{ background: 'var(--danger)', boxShadow: '0 0 8px var(--danger)' }}></div>
-                Brak połączenia z API
-                </div>
-            )}
-        </div>
-      </header>
+    <>
+      <div className="dashboard-container">
+        <header className="header fade-in">
+          <h1>
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+            </svg>
+            AI Trading Crypto Bot
+          </h1>
 
-      <div className="dashboard-grid">
-        
-        {/* Data & Chart Panel */}
-        <div className="glass-panel col-span-8 fade-in" style={{ animationDelay: '0.1s' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem', flexWrap: 'wrap', gap: '1rem' }}>
-                <h2 className="panel-title" style={{ marginBottom: 0 }}>
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
-                    <line x1="8" y1="21" x2="16" y2="21"></line>
-                    <line x1="12" y1="17" x2="12" y2="21"></line>
-                    </svg>
-                    Live ByBit
-                </h2>
-                <div style={{ display: 'flex', gap: '20px', alignItems: 'center', flexWrap: 'wrap' }}>
-                    
-                    <div style={{ display: 'flex', gap: '5px', background: 'rgba(0,0,0,0.2)', padding: '4px', borderRadius: '8px' }}>
-                        {['1m', '5m', '15m', '1h', '4h', '1d'].map(tf => (
-                            <button 
-                                key={tf}
-                          onClick={() => setChartTimeframe(tf)}
-                                style={{
-                            background: chartTimeframe === tf ? 'rgba(63, 185, 80, 0.1)' : 'transparent',
-                                    border: 'none',
-                            color: chartTimeframe === tf ? 'var(--success)' : 'var(--text-secondary)',
-                                    padding: '0.3rem 0.6rem',
-                                    borderRadius: '4px',
-                                    cursor: 'pointer',
-                                    fontSize: '0.85rem',
-                            fontWeight: chartTimeframe === tf ? 600 : 400,
-                                    transition: 'all 0.2s'
-                                }}
-                            >
-                                {tf}
-                            </button>
-                        ))}
-                    </div>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.5rem' }}>
+            <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+              <button
+                className="btn-secondary header-action-btn"
+                onClick={() => {
+                  setConfigNotice(null);
+                  setIsConfigDialogOpen(true);
+                }}
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="3"></circle>
+                  <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 .99-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 .99 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51.99H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51.99V15z"></path>
+                </svg>
+              </button>
 
-                    <div style={{ display: 'flex', gap: '5px' }}>
-                        {['ETH/USDT', 'BTC/USDT'].map(pair => (
-                            <button 
-                                key={pair}
-                                onClick={() => setActivePair(pair)}
-                                style={{
-                                    background: activePair === pair ? 'var(--accent-glow)' : 'rgba(0,0,0,0.2)',
-                                    border: `1px solid ${activePair === pair ? 'var(--accent-color)' : 'var(--panel-border)'}`,
-                                    color: activePair === pair ? 'var(--accent-color)' : 'var(--text-secondary)',
-                                    padding: '0.3rem 0.8rem',
-                                    borderRadius: '6px',
-                                    cursor: 'pointer',
-                                    fontSize: '0.9rem',
-                                    fontWeight: activePair === pair ? 600 : 400
-                                }}
-                            >
-                                {pair}
-                            </button>
-                        ))}
-                    </div>
-                </div>
+              <button
+                className="btn-secondary header-action-btn"
+                onClick={toggleStrategiesActivity}
+                disabled={isTogglingStrategies}
+                style={{
+                  borderColor: isStrategiesActive ? 'rgba(248, 81, 73, 0.35)' : 'rgba(63, 185, 80, 0.35)',
+                  background: isStrategiesActive ? 'rgba(248, 81, 73, 0.12)' : 'rgba(63, 185, 80, 0.12)',
+                  color: isStrategiesActive ? 'var(--danger)' : 'var(--success)',
+                  opacity: isTogglingStrategies ? 0.7 : 1,
+                  cursor: isTogglingStrategies ? 'wait' : 'pointer',
+                }}
+              >
+                {isTogglingStrategies
+                  ? 'Zmiana...'
+                  : (isStrategiesActive ? 'Dezaktywuj strategie' : 'Aktywuj strategie')}
+              </button>
             </div>
-          
-            {/* Chart Container */}
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
-               <div ref={priceChartContainerRef} style={{ width: '100%', height: '320px', borderRadius: '8px', overflow: 'hidden' }} />
-               <div ref={oscillatorChartContainerRef} style={{ width: '100%', height: '220px', borderRadius: '8px', overflow: 'hidden' }} />
+
+            {activityNotice && (
+              <div style={{ color: 'var(--text-secondary)', fontSize: '0.82rem' }}>
+                {activityNotice}
               </div>
-            
-            {/* Legend for chart */}
-              <div style={{ display: 'flex', gap: '15px', marginTop: '10px', fontSize: '0.8rem', color: 'var(--text-secondary)', flexWrap: 'wrap' }}>
-                 <div style={{display: 'flex', alignItems: 'center', gap: '5px'}}><span style={{display: 'inline-block', width: '10px', height: '2px', background: '#3b82f6'}}></span> EMA 9</div>
-                 <div style={{display: 'flex', alignItems: 'center', gap: '5px'}}><span style={{display: 'inline-block', width: '10px', height: '2px', background: '#f59e0b'}}></span> EMA 18</div>
-                <div style={{display: 'flex', alignItems: 'center', gap: '5px'}}><span style={{display: 'inline-block', width: '10px', height: '2px', background: '#b6efe3'}}></span> MSO (panel dolny)</div>
-                <div style={{display: 'flex', alignItems: 'center', gap: '5px'}}><span style={{display: 'inline-block', width: '10px', height: '2px', background: '#1e63ff'}}></span> MACD line</div>
-                <div style={{display: 'flex', alignItems: 'center', gap: '5px'}}><span style={{display: 'inline-block', width: '10px', height: '2px', background: '#ff8a00'}}></span> Signal line</div>
-                <div style={{display: 'flex', alignItems: 'center', gap: '5px'}}><span style={{display: 'inline-block', width: '10px', height: '8px', background: '#9ad4c6'}}></span> Cycle histogram (LuxAlgo)</div>
+            )}
+          </div>
+        </header>
+
+        <div style={{ padding: '0 0 1rem ' }}>
+        {botData ? (
+          <div className="status-badge">
+            <div className="status-dot"></div>
+            {botData.status}
+          </div>
+          ) : (
+            <div className="status-badge" style={{ background: 'rgba(248, 81, 73, 0.1)', color: 'var(--danger)', borderColor: 'rgba(248, 81, 73, 0.2)' }}>
+              <div className="status-dot" style={{ background: 'var(--danger)', boxShadow: '0 0 8px var(--danger)' }}></div>
+              Brak połączenia z API
+            </div>
+          )} 
+        </div>
+
+        <div className="dashboard-grid">
+          <div className="glass-panel col-span-8 fade-in" style={{ animationDelay: '0.1s' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem', flexWrap: 'wrap', gap: '1rem' }}>
+              <h2 className="panel-title" style={{ marginBottom: 0 }}>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+                  <line x1="8" y1="21" x2="16" y2="21"></line>
+                  <line x1="12" y1="17" x2="12" y2="21"></line>
+                </svg>
+                Live ByBit
+              </h2>
+
+              <div style={{ display: 'flex', gap: '20px', alignItems: 'center', flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', gap: '5px', background: 'rgba(0,0,0,0.2)', padding: '4px', borderRadius: '8px' }}>
+                  {['1m', '5m', '15m', '1h', '4h', '1d'].map((tf) => (
+                    <button
+                      key={tf}
+                      onClick={() => setChartTimeframe(tf)}
+                      style={{
+                        background: chartTimeframe === tf ? 'rgba(63, 185, 80, 0.1)' : 'transparent',
+                        border: 'none',
+                        color: chartTimeframe === tf ? 'var(--success)' : 'var(--text-secondary)',
+                        padding: '0.3rem 0.6rem',
+                        borderRadius: '4px',
+                        cursor: 'pointer',
+                        fontSize: '0.85rem',
+                        fontWeight: chartTimeframe === tf ? 600 : 400,
+                        transition: 'all 0.2s',
+                      }}
+                    >
+                      {tf}
+                    </button>
+                  ))}
+                </div>
+
+                <div style={{ display: 'flex', gap: '5px' }}>
+                  {ALERT_SYMBOL_OPTIONS.map((pair) => (
+                    <button
+                      key={pair}
+                      onClick={() => setActivePair(pair)}
+                      style={{
+                        background: activePair === pair ? 'var(--accent-glow)' : 'rgba(0,0,0,0.2)',
+                        border: `1px solid ${activePair === pair ? 'var(--accent-color)' : 'var(--panel-border)'}`,
+                        color: activePair === pair ? 'var(--accent-color)' : 'var(--text-secondary)',
+                        padding: '0.3rem 0.8rem',
+                        borderRadius: '6px',
+                        cursor: 'pointer',
+                        fontSize: '0.9rem',
+                        fontWeight: activePair === pair ? 600 : 400,
+                      }}
+                    >
+                      {pair}
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
 
-            <div className="dashboard-grid" style={{ marginTop: '1.5rem', marginBottom: '1.5rem' }}>
-                <div className="glass-panel col-span-6" style={{ padding: '1rem', background: 'rgba(0,0,0,0.2)' }}>
-                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>Market Structure Oscillator (MSO) <span style={{fontSize: '0.7rem', fontWeight: 400}}>(bot logic status)</span></div>
-                    <div style={{ 
-                        fontSize: '1.8rem', 
-                        fontWeight: 600, 
-                        color: botData?.metrics[activePair]?.mso !== undefined ? (botData.metrics[activePair]!.mso > 50 ? 'var(--success)' : 'var(--danger)') : 'inherit',
-                        marginTop: '0.5rem' 
-                    }}>
-                        {botData?.metrics[activePair]?.mso !== undefined ? botData.metrics[activePair]!.mso.toFixed(1) : '--'}
-                    </div>
-                </div>
-                <div className="glass-panel col-span-6" style={{ padding: '1rem', background: 'rgba(0,0,0,0.2)' }}>
-                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>Norm MACD & Trend <span style={{fontSize: '0.7rem', fontWeight: 400}}>(bot logic status)</span></div>
-                    <div style={{ 
-                        fontSize: '1.8rem', 
-                        fontWeight: 600, 
-                        color: botData?.metrics[activePair]?.trend === 'Byczy' ? 'var(--success)' : 'var(--danger)',
-                        marginTop: '0.5rem',
-                        display: 'flex',
-                        alignItems: 'baseline',
-                        gap: '10px'
-                    }}>
-                        {botData?.metrics[activePair]?.macd !== undefined ? botData.metrics[activePair]!.macd.toFixed(1) : '--'}
-                        <span style={{ fontSize: '1rem', fontWeight: 400 }}>({botData?.metrics[activePair]?.trend || '--'})</span>
-                    </div>
-                </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+              <div ref={priceChartContainerRef} style={{ width: '100%', height: '320px', borderRadius: '8px', overflow: 'hidden' }} />
+              <div ref={oscillatorChartContainerRef} style={{ width: '100%', height: '220px', borderRadius: '8px', overflow: 'hidden' }} />
             </div>
 
-         </div>
+            <div style={{ display: 'flex', gap: '15px', marginTop: '10px', fontSize: '0.8rem', color: 'var(--text-secondary)', flexWrap: 'wrap' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}><span style={{ display: 'inline-block', width: '10px', height: '2px', background: '#3b82f6' }}></span> EMA 9</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}><span style={{ display: 'inline-block', width: '10px', height: '2px', background: '#f59e0b' }}></span> EMA 18</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}><span style={{ display: 'inline-block', width: '10px', height: '2px', background: '#b6efe3' }}></span> MSO (panel dolny)</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}><span style={{ display: 'inline-block', width: '10px', height: '2px', background: '#1e63ff' }}></span> MACD line</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}><span style={{ display: 'inline-block', width: '10px', height: '2px', background: '#ff8a00' }}></span> Signal line</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}><span style={{ display: 'inline-block', width: '10px', height: '8px', background: '#9ad4c6' }}></span> Cycle histogram (LuxAlgo)</div>
+            </div>
+          </div>
 
-        {/* Signals Sidebar */}
-        <div className="col-span-4 fade-in" style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem', animationDelay: '0.2s' }}>
+          <div className="col-span-4 fade-in" style={{ display: 'flex', flexDirection: 'column', minHeight: 0, animationDelay: '0.2s' }}>
+            <div className="glass-panel signals-panel">
+              <h2 className="panel-title">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M22 12h-4l-3 9L9 3l-3 9H2"></path>
+                </svg>
+                Ostatnie Sygnały {botData?.last_check && <span style={{ fontSize: '0.8rem', fontWeight: 400 }}>(Check: {botData.last_check})</span>}
+              </h2>
 
-          {/* Alert Settings Panel */}
-          <div className="glass-panel">
-            <h2 className="panel-title">
+              <div style={{ marginBottom: '0.9rem', fontSize: '0.82rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+                <div>Tryb strategii: {isStrategiesActive ? 'AKTYWNE' : 'WYŁĄCZONE'}</div>
+                <div>Pary alertów: {activeBotSymbols.join(', ')}</div>
+              </div>
+
+              <div className="signals-scroll-container">
+                {botData?.signals && botData.signals.length > 0 ? (
+                  botData.signals.map((sig: Signal, i: number) => (
+                    <div
+                      key={i}
+                      className="signal-item"
+                      style={{ borderLeft: `3px solid ${sig.type === 'LONG' ? 'var(--success)' : 'var(--danger)'}` }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                        <span style={{ fontWeight: 600, fontSize: '0.9rem' }}>{sig.pair}</span>
+                        <span style={{ color: 'var(--text-secondary)', fontSize: '0.8rem' }}>{sig.time}</span>
+                      </div>
+                      <div style={{ fontSize: '0.85rem' }}>{sig.reason}</div>
+                    </div>
+                  ))
+                ) : (
+                  <div style={{ color: 'var(--text-secondary)', textAlign: 'center', padding: '2rem 0' }}>Brak nowych sygnałów.</div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {isConfigDialogOpen && (
+        <div
+          className="dialog-backdrop"
+          onClick={() => {
+            setIsConfigDialogOpen(false);
+            setConfigNotice(null);
+          }}
+        >
+          <div className="dialog-card" onClick={(event) => event.stopPropagation()}>
+            <h2 className="panel-title" style={{ marginBottom: '1rem' }}>
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M12 1v22"></path>
                 <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7H14a3.5 3.5 0 0 1 0 7H6"></path>
               </svg>
               Ustawienia Alertów
             </h2>
+
+            <div className="form-group">
+              <label>Pary alertów (multi-select)</label>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                {ALERT_SYMBOL_OPTIONS.map((symbol) => (
+                  <label
+                    key={symbol}
+                    style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--text-secondary)', fontSize: '0.9rem' }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={alertConfig.active_symbols.includes(symbol)}
+                      onChange={(event) => toggleAlertSymbol(symbol, event.target.checked)}
+                    />
+                    {symbol}
+                  </label>
+                ))}
+              </div>
+            </div>
 
             <div className="form-group">
               <label>Aktywne strategie</label>
@@ -781,14 +940,14 @@ export default function Dashboard() {
                 ))}
               </div>
               <div style={{ marginTop: '0.5rem', color: 'var(--text-secondary)', fontSize: '0.8rem' }}>
-                Możesz mieć aktywnych kilka strategii jednocześnie.
+                Aktywuj/dezaktywuj strategię osobnym przyciskiem w nagłówku.
               </div>
             </div>
 
             <div className="form-group">
               <label>Timeframe alertów</label>
               <select
-                className="form-input"
+                className="form-input timeframe-select"
                 value={alertConfig.timeframe}
                 onChange={(event) => setAlertConfig((prev) => ({ ...prev, timeframe: event.target.value }))}
               >
@@ -831,15 +990,6 @@ export default function Dashboard() {
               Ponawiaj alerty, gdy warunek trwa przez kolejne świece
             </label>
 
-            <button
-              className="btn-primary"
-              onClick={saveAlertConfig}
-              disabled={isSavingConfig}
-              style={{ opacity: isSavingConfig ? 0.7 : 1, cursor: isSavingConfig ? 'wait' : 'pointer' }}
-            >
-              {isSavingConfig ? 'Zapisywanie...' : 'Zapisz ustawienia'}
-            </button>
-
             {configNotice && (
               <div style={{ marginTop: '0.75rem', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
                 {configNotice}
@@ -847,42 +997,42 @@ export default function Dashboard() {
             )}
 
             {botData?.active_settings && (
-              <div style={{ marginTop: '0.75rem', fontSize: '0.85rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+              <div style={{ marginTop: '0.85rem', fontSize: '0.85rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
                 <div>Aktywne po stronie bota: {activeBotStrategies.length > 0 ? activeBotStrategies.map((strategyId) => getStrategyLabel(strategyId)).join(', ') : '--'}</div>
+                <div>Pary po stronie bota: {activeBotSymbols.join(', ')}</div>
                 <div>Timeframe: {botData.active_settings.timeframe}</div>
                 <div>Ponawianie: {botData.active_settings.repeat_alerts ? 'ON' : 'OFF'}</div>
               </div>
             )}
-          </div>
-            
-            {/* Signals Panel */}
-            <div className="glass-panel" style={{ flexGrow: 1 }}>
-                <h2 className="panel-title">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M22 12h-4l-3 9L9 3l-3 9H2"></path>
-                    </svg>
-                    Ostatnie Sygnały {botData?.last_check && <span style={{fontSize: '0.8rem', fontWeight:400}}>(Check: {botData.last_check})</span>}
-                </h2>
-                
-                <div style={{ maxHeight: 'calc(100vh - 250px)', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                    {botData?.signals && botData.signals.length > 0 ? (
-                        botData.signals.map((sig: Signal, i: number) => (
-                            <div key={i} style={{ padding: '0.75rem', background: 'rgba(0,0,0,0.2)', borderRadius: '8px', borderLeft: `3px solid ${sig.type === 'LONG' ? 'var(--success)' : 'var(--danger)'}` }}>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
-                                    <span style={{ fontWeight: 600, fontSize: '0.9rem' }}>{sig.pair}</span>
-                                    <span style={{ color: 'var(--text-secondary)', fontSize: '0.8rem' }}>{sig.time}</span>
-                                </div>
-                                <div style={{ fontSize: '0.85rem' }}>{sig.reason}</div>
-                            </div>
-                        ))
-                    ) : (
-                        <div style={{ color: 'var(--text-secondary)', textAlign: 'center', padding: '2rem 0' }}>Brak nowych sygnałów.</div>
-                    )}
-                </div>
+
+            <div className="dialog-actions">
+              <button
+                className="btn-secondary"
+                onClick={() => {
+                  setIsConfigDialogOpen(false);
+                  setConfigNotice(null);
+                }}
+              >
+                Zamknij
+              </button>
+
+              <button
+                className="btn-primary"
+                onClick={saveAlertConfig}
+                disabled={isSavingConfig}
+                style={{
+                  width: 'auto',
+                  marginTop: 0,
+                  opacity: isSavingConfig ? 0.7 : 1,
+                  cursor: isSavingConfig ? 'wait' : 'pointer',
+                }}
+              >
+                {isSavingConfig ? 'Zapisywanie...' : 'Zapisz ustawienia'}
+              </button>
             </div>
-            
+          </div>
         </div>
-      </div>
-    </div>
+      )}
+    </>
   );
 }
