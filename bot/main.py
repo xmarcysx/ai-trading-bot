@@ -62,11 +62,11 @@ bot_state = {
 }
 
 # Configuration
-ENV_TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-ENV_TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+ENV_TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+ENV_TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+ENV_PORT_RAW = os.getenv("PORT", "8000").strip()
+ENV_PORT = int(ENV_PORT_RAW) if ENV_PORT_RAW.isdigit() else 8000
 DEFAULT_RUNTIME_CONFIG: Dict[str, Any] = {
-    "telegram_token": ENV_TELEGRAM_BOT_TOKEN,
-    "telegram_chat_id": ENV_TELEGRAM_CHAT_ID,
     "active_strategies": ["ema_cross_9_18"],
     "active_symbols": SUPPORTED_ALERT_SYMBOLS.copy(),
     "timeframe": "1h",
@@ -76,8 +76,6 @@ DEFAULT_RUNTIME_CONFIG: Dict[str, Any] = {
 
 
 class ConfigUpdateRequest(BaseModel):
-    telegram_token: Optional[str] = None
-    telegram_chat_id: Optional[str] = None
     active_strategies: Optional[List[str]] = None
     active_symbols: Optional[List[str]] = None
     # Backward-compatible single strategy input.
@@ -142,14 +140,6 @@ def _sanitize_symbol_list(raw: Any) -> List[str]:
 
 def _sanitize_runtime_config(raw: Dict[str, Any]) -> Dict[str, Any]:
     sanitized = DEFAULT_RUNTIME_CONFIG.copy()
-
-    token = raw.get("telegram_token")
-    if isinstance(token, str):
-        sanitized["telegram_token"] = token.strip()
-
-    chat_id = raw.get("telegram_chat_id")
-    if isinstance(chat_id, str):
-        sanitized["telegram_chat_id"] = chat_id.strip()
 
     strategies = _sanitize_strategy_list(raw.get("active_strategies"))
     if not strategies:
@@ -234,8 +224,10 @@ def public_runtime_config(config: Dict[str, Any]) -> Dict[str, Any]:
     active_strategies = list(config["active_strategies"])
     active_symbols = list(config["active_symbols"])
     return {
-        "telegram_token": config["telegram_token"],
-        "telegram_chat_id": config["telegram_chat_id"],
+        "telegram_token": ENV_TELEGRAM_BOT_TOKEN,
+        "telegram_chat_id": ENV_TELEGRAM_CHAT_ID,
+        "telegram_token_configured": bool(ENV_TELEGRAM_BOT_TOKEN),
+        "telegram_chat_id_configured": bool(ENV_TELEGRAM_CHAT_ID),
         "active_strategy": active_strategies[0] if active_strategies else None,
         "active_strategies": active_strategies,
         "active_symbols": active_symbols,
@@ -364,12 +356,11 @@ def evaluate_active_strategy(
 
 def bot_loop():
     print("Starting bot loop...")
-    startup_config = get_runtime_config_snapshot()
-    if startup_config['telegram_token'] and startup_config['telegram_chat_id']:
+    if ENV_TELEGRAM_BOT_TOKEN and ENV_TELEGRAM_CHAT_ID:
         asyncio.run(send_telegram_message(
             "🤖 AI Crypto Trader Alert Engine started",
-            startup_config['telegram_token'],
-            startup_config['telegram_chat_id'],
+            ENV_TELEGRAM_BOT_TOKEN,
+            ENV_TELEGRAM_CHAT_ID,
         ))
 
     # Prevent repeated messages for the same symbol, strategy and closed candle.
@@ -419,8 +410,8 @@ def bot_loop():
                         print(f"{symbol} {message}")
                         asyncio.run(send_telegram_message(
                             message,
-                            config['telegram_token'],
-                            config['telegram_chat_id'],
+                            ENV_TELEGRAM_BOT_TOKEN,
+                            ENV_TELEGRAM_CHAT_ID,
                         ))
                         last_alert_marker[marker_key] = closed_candle_timestamp
 
@@ -506,12 +497,6 @@ def update_config(data: ConfigUpdateRequest):
     with config_lock:
         next_config = runtime_config.copy()
 
-        if data.telegram_token is not None:
-            next_config["telegram_token"] = data.telegram_token.strip()
-
-        if data.telegram_chat_id is not None:
-            next_config["telegram_chat_id"] = data.telegram_chat_id.strip()
-
         if data.active_strategies is not None:
             sanitized_strategies = _sanitize_strategy_list(data.active_strategies)
             if not sanitized_strategies:
@@ -554,11 +539,11 @@ def update_config(data: ConfigUpdateRequest):
         snapshot["strategies_active"],
     )
 
-    if snapshot['telegram_token'] and snapshot['telegram_chat_id']:
+    if ENV_TELEGRAM_BOT_TOKEN and ENV_TELEGRAM_CHAT_ID:
         asyncio.run(send_telegram_message(
             "✅ Konfiguracja alertów zapisana.",
-            snapshot['telegram_token'],
-            snapshot['telegram_chat_id'],
+            ENV_TELEGRAM_BOT_TOKEN,
+            ENV_TELEGRAM_CHAT_ID,
         ))
 
     return {"status": "success", "data": public_runtime_config(snapshot)}
@@ -592,4 +577,4 @@ if __name__ == "__main__":
     thread.start()
     
     # Start FastAPI server
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=ENV_PORT)

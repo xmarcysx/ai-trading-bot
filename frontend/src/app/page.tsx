@@ -28,12 +28,17 @@ interface BotData {
 }
 
 interface AlertConfigData {
-  telegram_token: string;
-  telegram_chat_id: string;
   active_strategies: string[];
   active_symbols: string[];
   timeframe: string;
   repeat_alerts: boolean;
+}
+
+interface TelegramEnvData {
+  token: string;
+  chatId: string;
+  tokenConfigured: boolean;
+  chatIdConfigured: boolean;
 }
 
 interface ChartRow {
@@ -50,7 +55,7 @@ interface ChartRow {
   cycleHist: number | null;
 }
 
-const API_BASE_URL = 'http://localhost:8000';
+const API_BASE_URL = (process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000').replace(/\/$/, '');
 
 const STRATEGY_OPTIONS = [
   { id: 'ema_cross_9_18', label: 'EMA Cross 9/18' },
@@ -75,12 +80,16 @@ export default function Dashboard() {
   const [activePair, setActivePair] = useState('ETH/USDT');
   const [chartTimeframe, setChartTimeframe] = useState('1h');
   const [alertConfig, setAlertConfig] = useState<AlertConfigData>({
-    telegram_token: '',
-    telegram_chat_id: '',
     active_strategies: ['ema_cross_9_18'],
     active_symbols: ALERT_SYMBOL_OPTIONS,
     timeframe: '1h',
     repeat_alerts: false,
+  });
+  const [telegramEnvData, setTelegramEnvData] = useState<TelegramEnvData>({
+    token: '',
+    chatId: '',
+    tokenConfigured: false,
+    chatIdConfigured: false,
   });
   const [isConfigDialogOpen, setIsConfigDialogOpen] = useState(false);
   const [isStrategiesActive, setIsStrategiesActive] = useState(true);
@@ -132,6 +141,13 @@ export default function Dashboard() {
 
       const payload = await res.json();
       if (payload.status === 'success' && payload.data) {
+        setTelegramEnvData({
+          token: payload.data.telegram_token ?? '',
+          chatId: payload.data.telegram_chat_id ?? '',
+          tokenConfigured: Boolean(payload.data.telegram_token_configured),
+          chatIdConfigured: Boolean(payload.data.telegram_chat_id_configured),
+        });
+
         const activeStrategies = Array.isArray(payload.data.active_strategies)
           ? payload.data.active_strategies.filter((value: unknown): value is string => typeof value === 'string')
           : (typeof payload.data.active_strategy === 'string' ? [payload.data.active_strategy] : []);
@@ -142,8 +158,6 @@ export default function Dashboard() {
           : [];
 
         setAlertConfig({
-          telegram_token: payload.data.telegram_token ?? '',
-          telegram_chat_id: payload.data.telegram_chat_id ?? '',
           active_strategies: activeStrategies.length > 0 ? activeStrategies : ['ema_cross_9_18'],
           active_symbols: activeSymbols.length > 0 ? activeSymbols : ALERT_SYMBOL_OPTIONS,
           timeframe: payload.data.timeframe ?? '1h',
@@ -189,6 +203,13 @@ export default function Dashboard() {
 
       const payload = await res.json();
       if (payload.status === 'success' && payload.data) {
+        setTelegramEnvData({
+          token: payload.data.telegram_token ?? '',
+          chatId: payload.data.telegram_chat_id ?? '',
+          tokenConfigured: Boolean(payload.data.telegram_token_configured),
+          chatIdConfigured: Boolean(payload.data.telegram_chat_id_configured),
+        });
+
         const activeStrategies = Array.isArray(payload.data.active_strategies)
           ? payload.data.active_strategies.filter((value: unknown): value is string => typeof value === 'string')
           : (typeof payload.data.active_strategy === 'string' ? [payload.data.active_strategy] : []);
@@ -199,8 +220,6 @@ export default function Dashboard() {
           : [];
 
         setAlertConfig({
-          telegram_token: payload.data.telegram_token ?? '',
-          telegram_chat_id: payload.data.telegram_chat_id ?? '',
           active_strategies: activeStrategies.length > 0 ? activeStrategies : alertConfig.active_strategies,
           active_symbols: activeSymbols.length > 0 ? activeSymbols : alertConfig.active_symbols,
           timeframe: payload.data.timeframe ?? alertConfig.timeframe,
@@ -769,6 +788,16 @@ export default function Dashboard() {
           )} 
         </div>
 
+        {activityNotice && (
+          <div style={{
+            marginBottom: '1rem',
+            color: 'var(--text-secondary)',
+            fontSize: '0.85rem',
+          }}>
+            {activityNotice}
+          </div>
+        )}
+
         <div className="dashboard-grid">
           <div className="glass-panel col-span-8 fade-in" style={{ animationDelay: '0.1s' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem', flexWrap: 'wrap', gap: '1rem' }}>
@@ -954,24 +983,31 @@ export default function Dashboard() {
             </div>
 
             <div className="form-group">
-              <label>Telegram Bot Token</label>
-              <input
-                className="form-input"
-                type="password"
-                placeholder="Wklej token bota"
-                value={alertConfig.telegram_token}
-                onChange={(event) => setAlertConfig((prev) => ({ ...prev, telegram_token: event.target.value }))}
-              />
-            </div>
+              <label>Telegram (ENV backendu)</label>
+              <div style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', lineHeight: 1.5 }}>
+                <div>Token: {telegramEnvData.tokenConfigured ? 'OK' : 'BRAK'}</div>
+                <div>Chat ID: {telegramEnvData.chatIdConfigured ? 'OK' : 'BRAK'}</div>
+                <div style={{ marginTop: '0.4rem', fontSize: '0.8rem' }}>
+                  Ustaw TELEGRAM_BOT_TOKEN i TELEGRAM_CHAT_ID po stronie backendu.
+                </div>
+              </div>
 
-            <div className="form-group">
-              <label>Telegram Chat ID</label>
               <input
                 className="form-input"
                 type="text"
-                placeholder="Np. 123456789"
-                value={alertConfig.telegram_chat_id}
-                onChange={(event) => setAlertConfig((prev) => ({ ...prev, telegram_chat_id: event.target.value }))}
+                readOnly
+                value={telegramEnvData.token}
+                placeholder="Brak TELEGRAM_BOT_TOKEN"
+                style={{ marginTop: '0.65rem' }}
+              />
+
+              <input
+                className="form-input"
+                type="text"
+                readOnly
+                value={telegramEnvData.chatId}
+                placeholder="Brak TELEGRAM_CHAT_ID"
+                style={{ marginTop: '0.5rem' }}
               />
             </div>
 

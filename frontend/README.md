@@ -21,7 +21,7 @@ Dashboard pokazuje cenę, metryki i sygnały, a bot cyklicznie analizuje świece
 ## Architektura
 
 - Frontend: `http://localhost:3000`
-- Backend API: `http://localhost:8000`
+- Backend API: ustawiany przez `NEXT_PUBLIC_API_URL` (lokalnie `http://localhost:8000`)
 - Frontend pobiera dane z backendu przez:
 	- `GET /api/state`
 	- `GET /api/config`
@@ -74,10 +74,17 @@ Konfigurację możesz zmieniać na dwa sposoby:
 - z poziomu dashboardu (rekomendowane),
 - przez plik `../bot/bot_config.json`.
 
+Sekrety Telegram ustawiaj tylko po stronie backendu (`bot/.env`).
+UI pokazuje je jedynie w trybie read-only (podgląd), bez zapisu do konfiguracji.
+Przykład pliku `bot/.env`:
+
+```env
+TELEGRAM_BOT_TOKEN=<TELEGRAM_BOT_TOKEN>
+TELEGRAM_CHAT_ID=<TELEGRAM_CHAT_ID>
+```
+
 Najważniejsze pola:
 
-- `telegram_token`
-- `telegram_chat_id`
 - `active_strategies`
 - `active_symbols`
 - `timeframe` (`1m`, `5m`, `15m`, `1h`, `4h`)
@@ -88,8 +95,6 @@ Przykład:
 
 ```json
 {
-	"telegram_token": "<TELEGRAM_BOT_TOKEN>",
-	"telegram_chat_id": "<TELEGRAM_CHAT_ID>",
 	"active_strategies": ["ema_cross_9_18", "macd_cross"],
 	"active_symbols": ["ETH/USDT", "BTC/USDT"],
 	"timeframe": "1h",
@@ -105,6 +110,14 @@ Przykład:
 - `npm run start` - start po buildzie
 - `npm run lint` - lint
 
+## Zmienne srodowiskowe frontendu
+
+Utworz `frontend/.env.local` (np. na bazie `frontend/.env.example`) i ustaw:
+
+```env
+NEXT_PUBLIC_API_URL=http://localhost:8000
+```
+
 ## Uwagi bezpieczeństwa
 
 - Nie commituj prawdziwych tokenów Telegram do repozytorium.
@@ -114,4 +127,4 @@ Przykład:
 
 - Brak danych w dashboardzie: sprawdź, czy backend działa na porcie `8000`.
 - Błędy przy pobieraniu świec: sprawdź połączenie sieciowe i dostępność API giełdy.
-- Brak alertów na Telegramie: zweryfikuj `telegram_token`, `telegram_chat_id` i `strategies_active`.
+- Brak alertów na Telegramie: zweryfikuj `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` i `strategies_active`.
