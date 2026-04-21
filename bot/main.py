@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from telegram import Bot
 
 from indicators import calculate_mso, calculate_normalized_macd
+from zaorski import calculate_zaorski_signal, format_zaorski_alert, ZAORSKI_SYMBOL
 
 load_dotenv()
 
@@ -27,6 +28,7 @@ STRATEGY_DEFINITIONS: Dict[str, str] = {
     "ema_cross_9_18": "EMA Cross 9/18",
     "macd_cross": "MACD Cross",
     "market_structure_85_15": "Market Structure Oscillator 85/15",
+    "zaorski_btc": "ZAORSKI BTC (Contrarian Sentiment)",
 }
 LEGACY_STRATEGY_ALIASES = {
     "market_structure_gt_85": "market_structure_85_15",
@@ -58,7 +60,13 @@ bot_state = {
     "metrics": {
         symbol: {"mso": 50, "macd": 50, "trend": "Neutralny", "price": 0}
         for symbol in MONITORED_SYMBOLS
-    }
+    },
+    "zaorski": {
+        "last_check": None,
+        "last_signal": None,
+        "score": 0,
+        "details": [],
+    },
 }
 
 # Configuration
@@ -444,6 +452,76 @@ def bot_loop():
             bot_state["status"] = f"Błąd: {str(e)}"
             time.sleep(30)
 
+ZAORSKI_CHECK_INTERVAL_SECONDS = 30 * 60   # check every 30 minutes
+ZAORSKI_COOLDOWN_SECONDS = 4 * 60 * 60    # don't repeat same direction within 4 hours
+
+
+def zaorski_loop():
+    """
+    Runs independently of the candle-based bot loop.
+    Every 30 minutes it fetches sentiment data (funding rate, F&G, L/S ratio, OI)
+    and sends a Telegram alert when the composite score crosses the threshold.
+    Same-direction signals are suppressed for 4 hours to avoid spam.
+    """
+    print("[ZAORSKI] Starting sentiment loop...")
+
+    last_alert_time: Dict[str, float] = {}  # signal_type -> unix timestamp
+
+    while True:
+        config = get_runtime_config_snapshot()
+        if not config.get("strategies_active", True):
+            time.sleep(ZAORSKI_CHECK_INTERVAL_SECONDS)
+            continue
+
+        active_strategies = config.get("active_strategies", [])
+        if "zaorski_btc" not in active_strategies:
+            time.sleep(ZAORSKI_CHECK_INTERVAL_SECONDS)
+            continue
+
+        try:
+            result = calculate_zaorski_signal(exchange)
+            now = time.time()
+            check_time = time.strftime("%H:%M:%S")
+
+            if result:
+                signal_type = result["signal"]
+                last_sent = last_alert_time.get(signal_type, 0)
+                cooldown_passed = (now - last_sent) >= ZAORSKI_COOLDOWN_SECONDS
+
+                bot_state["zaorski"]["last_signal"] = signal_type
+                bot_state["zaorski"]["score"] = result["score"]
+                bot_state["zaorski"]["details"] = result["details"]
+
+                if cooldown_passed:
+                    message = format_zaorski_alert(result)
+                    print(f"[ZAORSKI] {signal_type} score={result['score']:+d}")
+                    asyncio.run(send_telegram_message(
+                        message,
+                        ENV_TELEGRAM_BOT_TOKEN,
+                        ENV_TELEGRAM_CHAT_ID,
+                    ))
+                    last_alert_time[signal_type] = now
+
+                    bot_state["signals"].insert(0, {
+                        "pair": ZAORSKI_SYMBOL,
+                        "type": signal_type,
+                        "time": check_time,
+                        "reason": message,
+                    })
+                    bot_state["signals"] = bot_state["signals"][:20]
+            else:
+                bot_state["zaorski"]["last_signal"] = None
+                bot_state["zaorski"]["score"] = 0
+                bot_state["zaorski"]["details"] = []
+
+            bot_state["zaorski"]["last_check"] = check_time
+
+        except Exception as exc:
+            print(f"[ZAORSKI] Error: {exc}")
+
+        time.sleep(ZAORSKI_CHECK_INTERVAL_SECONDS)
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -455,6 +533,11 @@ app.add_middleware(
 @app.get("/api/state")
 def get_state():
     return bot_state
+
+
+@app.get("/api/zaorski")
+def get_zaorski():
+    return {"status": "success", "data": bot_state["zaorski"]}
 
 
 @app.get("/api/config")
@@ -572,9 +655,13 @@ def update_strategies_activity(data: StrategyActivityUpdateRequest):
     return {"status": "success", "data": {"strategies_active": snapshot["strategies_active"]}}
 
 if __name__ == "__main__":
-    # Start bot loop in a background thread
+    # Start candle-based bot loop
     thread = Thread(target=bot_loop, daemon=True)
     thread.start()
-    
+
+    # Start ZAORSKI sentiment loop (independent of candles)
+    zaorski_thread = Thread(target=zaorski_loop, daemon=True)
+    zaorski_thread.start()
+
     # Start FastAPI server
     uvicorn.run(app, host="0.0.0.0", port=ENV_PORT)
