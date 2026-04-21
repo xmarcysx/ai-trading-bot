@@ -61,9 +61,10 @@ const STRATEGY_OPTIONS = [
   { id: 'ema_cross_9_18', label: 'EMA Cross 9/18' },
   { id: 'macd_cross', label: 'MACD Cross' },
   { id: 'market_structure_85_15', label: 'Market Structure Oscillator 85/15' },
+  { id: 'zaorski_btc', label: 'ZAORSKI BTC (Contrarian Sentiment)' },
 ];
 
-const ALERT_SYMBOL_OPTIONS = ['ETH/USDT', 'BTC/USDT'];
+const ALERT_SYMBOL_OPTIONS = ['ETH/USDT', 'BTC/USDT', 'XAU/USDT'];
 const ALERT_TIMEFRAME_OPTIONS = ['1m', '5m', '15m', '1h', '4h'];
 
 const getStrategyLabel = (strategyId?: string) => {

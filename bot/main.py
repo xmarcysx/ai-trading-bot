@@ -22,7 +22,7 @@ load_dotenv()
 
 app = FastAPI()
 
-MONITORED_SYMBOLS = ["ETH/USDT", "BTC/USDT"]
+MONITORED_SYMBOLS = ["ETH/USDT", "BTC/USDT", "XAU/USDT"]
 SUPPORTED_ALERT_SYMBOLS = MONITORED_SYMBOLS.copy()
 STRATEGY_DEFINITIONS: Dict[str, str] = {
     "ema_cross_9_18": "EMA Cross 9/18",
